@@ -3,6 +3,11 @@ run-name: Prepare Three Houses pipeline A-B branches
 
 "on":
   workflow_dispatch:
+  push:
+    branches:
+      - XC-ios-ht
+    paths:
+      - .github/triggers/prepare-three-houses-pipeline-ab.txt
 
 permissions:
   contents: write
