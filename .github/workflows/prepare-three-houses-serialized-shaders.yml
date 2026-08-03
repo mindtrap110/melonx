@@ -1,0 +1,182 @@
+name: Prepare Three Houses serialized shader branch
+run-name: Prepare Three Houses serialized shader branch
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Create serialized-shader branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout safe-pipeline branch
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-safe-pipeline
+          fetch-depth: 0
+
+      - name: Serialize Vulkan shader creation and add diagnostics
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/Ryujinx.Graphics.Vulkan/Shader.cs")
+          text = path.read_text(encoding="utf-8")
+
+          using_old = "using System.Runtime.InteropServices;\nusing System.Threading.Tasks;"
+          using_new = "using System.Runtime.InteropServices;\nusing System.Threading;\nusing System.Threading.Tasks;"
+          if text.count(using_old) != 1:
+              raise SystemExit("Could not locate the Shader.cs using block exactly once.")
+          text = text.replace(using_old, using_new, 1)
+
+          field_old = "        private static readonly object _shaderOptionsLock = new();"
+          field_new = (
+              "        private static readonly object _shaderOptionsLock = new();\n"
+              "        private static readonly object _shaderCompileLock = new();\n"
+              "        private static int _nextShaderDiagnosticId;"
+          )
+          if text.count(field_old) != 1:
+              raise SystemExit("Could not locate the shader options lock exactly once.")
+          text = text.replace(field_old, field_new, 1)
+
+          old = '''            CompileTask = Task.Run(() =>
+            {
+                byte[] spirv = shaderSource.BinaryCode;
+
+                if (spirv == null)
+                {
+                    spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
+
+                    if (spirv == null)
+                    {
+                        CompileStatus = ProgramLinkStatus.Failure;
+
+                        return;
+                    }
+                }
+
+                fixed (byte* pCode = spirv)
+                {
+                    var shaderModuleCreateInfo = new ShaderModuleCreateInfo
+                    {
+                        SType = StructureType.ShaderModuleCreateInfo,
+                        CodeSize = (uint)spirv.Length,
+                        PCode = (uint*)pCode,
+                    };
+
+                    api.CreateShaderModule(device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
+                }
+
+                CompileStatus = ProgramLinkStatus.Success;
+            });'''
+
+          new = '''            int shaderDiagnosticId = Interlocked.Increment(ref _nextShaderDiagnosticId);
+
+            CompileTask = Task.Run(() =>
+            {
+                // MoltenVK performs SPIR-V conversion while Vulkan shader modules are created.
+                // Serialize this path on iOS so the initial shader burst cannot issue dozens of
+                // concurrent native conversion/module-creation operations into Metal.
+                lock (_shaderCompileLock)
+                {
+                    try
+                    {
+                        byte[] spirv = shaderSource.BinaryCode;
+                        string sourceKind = spirv == null ? "GLSL" : "SPIR-V";
+
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"ShaderSafe #{shaderDiagnosticId}: begin stage={_stage}, source={sourceKind}.");
+
+                        if (spirv == null)
+                        {
+                            spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
+
+                            if (spirv == null)
+                            {
+                                CompileStatus = ProgramLinkStatus.Failure;
+                                Logger.Error?.Print(
+                                    LogClass.Gpu,
+                                    $"ShaderSafe #{shaderDiagnosticId}: GLSL to SPIR-V conversion failed.");
+
+                                return;
+                            }
+                        }
+
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"ShaderSafe #{shaderDiagnosticId}: vkCreateShaderModule begin, bytes={spirv.Length}.");
+
+                        fixed (byte* pCode = spirv)
+                        {
+                            var shaderModuleCreateInfo = new ShaderModuleCreateInfo
+                            {
+                                SType = StructureType.ShaderModuleCreateInfo,
+                                CodeSize = (uint)spirv.Length,
+                                PCode = (uint*)pCode,
+                            };
+
+                            api.CreateShaderModule(device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
+                        }
+
+                        CompileStatus = ProgramLinkStatus.Success;
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"ShaderSafe #{shaderDiagnosticId}: vkCreateShaderModule completed.");
+                    }
+                    catch (Exception exception)
+                    {
+                        CompileStatus = ProgramLinkStatus.Failure;
+                        Logger.Error?.Print(
+                            LogClass.Gpu,
+                            $"ShaderSafe #{shaderDiagnosticId}: managed shader failure: {exception}");
+                    }
+                }
+            });'''
+
+          matches = text.count(old)
+          if matches != 1:
+              raise SystemExit(f"Expected exactly one Shader CompileTask block, found {matches}.")
+
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Verify serialized shader patch
+        run: |
+          set -euo pipefail
+          grep -Fq 'private static readonly object _shaderCompileLock = new();' \
+            src/Ryujinx.Graphics.Vulkan/Shader.cs
+          grep -Fq 'ShaderSafe #' src/Ryujinx.Graphics.Vulkan/Shader.cs
+          grep -Fq 'lock (_shaderCompileLock)' src/Ryujinx.Graphics.Vulkan/Shader.cs
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/Shader.cs
+
+      - name: Commit diagnostic branch
+        env:
+          TARGET_BRANCH: three-houses-serialized-shaders
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add src/Ryujinx.Graphics.Vulkan/Shader.cs
+          git commit -m "Serialize Vulkan shader module creation for iOS diagnostics"
+          git push --force origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Three Houses serialized shader branch prepared"
+            echo
+            echo "- Branch: \`three-houses-serialized-shaders\`"
+            echo "- Base: \`three-houses-safe-pipeline\`"
+            echo "- Adds: serialized shader conversion/module creation and ShaderSafe diagnostics"
+            echo "- Preserves: MoltenVK 1.4.2, increased-memory repack compatibility, JIT, and safe-pipeline patch"
+            echo
+            echo "Next: run \`iOS custom MoltenVK IPA v2\` on the new branch."
+          } >> "$GITHUB_STEP_SUMMARY"
