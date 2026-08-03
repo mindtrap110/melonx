@@ -1,0 +1,89 @@
+name: Prepare Three Houses pipeline A-B branches
+run-name: Prepare Three Houses pipeline A-B branches
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare ${{ matrix.mode }} branch
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: sparse
+            target_branch: three-houses-pipeline-sparse
+            commit_message: Add sparse Vulkan pipeline diagnostics
+          - mode: throttle
+            target_branch: three-houses-pipeline-throttle-4ms
+            commit_message: Add 4 ms Vulkan pipeline throttling experiment
+
+    steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@v4
+        with:
+          ref: XC-ios-ht
+          path: workflow-tools
+          fetch-depth: 1
+
+      - name: Checkout serialized-shader source
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-serialized-shaders
+          path: source
+          fetch-depth: 0
+
+      - name: Apply pipeline A-B patch
+        run: |
+          python3 workflow-tools/.github/scripts/prepare_three_houses_pipeline_ab.py \
+            source \
+            "${{ matrix.mode }}"
+
+      - name: Verify patch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          grep -Fq 'using Ryujinx.Common.Logging;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'PipelineAB' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'ShouldLogPipelineAb' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'PipelineThrottleMilliseconds' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          if [ "${{ matrix.mode }}" = "throttle" ]; then
+            grep -Fq 'PipelineThrottleMilliseconds = 4;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          else
+            grep -Fq 'PipelineThrottleMilliseconds = 0;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          fi
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+
+      - name: Commit branch
+        working-directory: source
+        env:
+          TARGET_BRANCH: ${{ matrix.target_branch }}
+          COMMIT_MESSAGE: ${{ matrix.commit_message }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          git commit -m "$COMMIT_MESSAGE"
+          git push --force origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Pipeline A-B branch prepared"
+            echo
+            echo "- Mode: ${{ matrix.mode }}"
+            echo "- Branch: ${{ matrix.target_branch }}"
+            echo "- Base: three-houses-serialized-shaders"
+            if [ "${{ matrix.mode }}" = "throttle" ]; then
+              echo "- Behavior: sparse logging plus 4 ms delay before each native pipeline creation"
+            else
+              echo "- Behavior: sparse logging only; no artificial delay"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
