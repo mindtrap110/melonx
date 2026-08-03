@@ -153,8 +153,13 @@ namespace Ryujinx.Graphics.Vulkan
         {
             _state = state;
 
-            _compileTask = BackgroundCompilation();
-            _firstBackgroundUse = !fromCache;
+            // MoltenVK/iOS compatibility mode: avoid concurrent background
+            // VkGraphicsPipeline creation while the first real draw is also creating
+            // pipelines on the render thread. Some Apple Metal driver failures terminate
+            // the process below managed exception handling, leaving an abruptly ended log.
+            _compileTask = Task.CompletedTask;
+            _firstBackgroundUse = false;
+            Logger.Info?.Print(LogClass.Gpu, "Three Houses safe mode: background pipeline precompilation disabled.");
         }
 
         private static bool HasPushDescriptorsBug(VulkanRenderer gd)
