@@ -1,0 +1,348 @@
+name: iOS custom MoltenVK IPA v2
+run-name: MeloNX custom MoltenVK v2 (${{ inputs.moltenvk_variant }})
+
+"on":
+  workflow_dispatch:
+    inputs:
+      moltenvk_variant:
+        description: MoltenVK source pinned for this build
+        required: true
+        default: upstream-f79c6c-minimal
+        type: choice
+        options:
+          - upstream-f79c6c-minimal
+          - kenji-ryujinx-a92318a
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-custom-moltenvk-${{ github.ref }}-${{ inputs.moltenvk_variant }}
+  cancel-in-progress: true
+
+env:
+  XCODE_PROJECT: src/MeloNX/MeloNX.xcodeproj
+  XCODE_SCHEME: MeloNX
+  XCODE_CONFIGURATION: Release
+  DERIVED_DATA_PATH: build/DerivedData
+  IPA_OUTPUT_DIR: build/ipa
+  RESULT_BUNDLE_PATH: build/MeloNX.xcresult
+  MOLTENVK_DIR: build/MoltenVK
+  MOLTENVK_TARGET_DYLIB: src/MeloNX/MeloNX/Dependencies/Dynamic Libraries/libMoltenVK.dylib
+  PR2632_MERGE: 48a4de435ff4e4c7ae47de8228f86dae23afa910
+  PR2681_MERGE: f79c6c5690d3ee06ec3a00d11a8b1bab4aa1d030
+
+jobs:
+  build:
+    name: Build unsigned IPA with private-API MoltenVK
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout MeloNX
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Select newest installed Xcode
+        run: |
+          set -euo pipefail
+          selected_xcode="$(find /Applications -maxdepth 1 -name 'Xcode*.app' -print | sort -V | tail -n 1)"
+          if [ -z "$selected_xcode" ]; then
+            echo "No Xcode installation found." >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$selected_xcode/Contents/Developer"
+          echo "Selected Xcode: $selected_xcode"
+          xcodebuild -version
+
+      - name: Set up Python for MoltenVK dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve pinned MoltenVK source
+        env:
+          VARIANT: ${{ inputs.moltenvk_variant }}
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            upstream-f79c6c-minimal)
+              repo="https://github.com/KhronosGroup/MoltenVK.git"
+              commit="$PR2681_MERGE"
+              ;;
+            kenji-ryujinx-a92318a)
+              repo="https://github.com/Kenji-NX/MoltenVK.git"
+              commit="a92318a88291be8f219abd2a11060fb0ebd0d2a2"
+              ;;
+            *)
+              echo "Unknown MoltenVK variant: $VARIANT" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "MOLTENVK_REPO=$repo"
+            echo "MOLTENVK_COMMIT=$commit"
+            echo "MOLTENVK_VARIANT=$VARIANT"
+          } >> "$GITHUB_ENV"
+
+      - name: Clone and verify MoltenVK history
+        run: |
+          set -euo pipefail
+          rm -rf "$MOLTENVK_DIR"
+          git clone --filter=blob:none --no-tags "$MOLTENVK_REPO" "$MOLTENVK_DIR"
+          git -C "$MOLTENVK_DIR" checkout --detach "$MOLTENVK_COMMIT"
+
+          actual_commit="$(git -C "$MOLTENVK_DIR" rev-parse HEAD)"
+          test "$actual_commit" = "$MOLTENVK_COMMIT"
+
+          # Both required merged changes must be ancestors of the selected source.
+          git -C "$MOLTENVK_DIR" merge-base --is-ancestor "$PR2632_MERGE" HEAD
+          git -C "$MOLTENVK_DIR" merge-base --is-ancestor "$PR2681_MERGE" HEAD
+
+          echo "MoltenVK variant: $MOLTENVK_VARIANT"
+          echo "MoltenVK commit:  $actual_commit"
+          git -C "$MOLTENVK_DIR" log -1 --oneline
+
+      - name: Fetch MoltenVK iOS dependencies
+        working-directory: ${{ env.MOLTENVK_DIR }}
+        run: |
+          set -euo pipefail
+          ./fetchDependencies --ios
+
+      - name: Build MoltenVK for iOS with private Metal API
+        working-directory: ${{ env.MOLTENVK_DIR }}
+        run: |
+          set -euo pipefail
+          make ios \
+            MVK_USE_METAL_PRIVATE_API=1 \
+            MVK_CONFIG_USE_METAL_PRIVATE_API=1
+
+      - name: Replace MeloNX MoltenVK dylib and verify it
+        run: |
+          set -euo pipefail
+
+          # Older MoltenVK packages exposed a naked iOS dylib. Newer packages
+          # expose iOS as a dynamic XCFramework instead, whose framework binary
+          # is still a Mach-O dynamic library. Accept either package layout.
+          built_dylib="$(
+            find "$MOLTENVK_DIR/Package" \
+              -type f \
+              -path '*/dynamic/dylib/iOS/libMoltenVK.dylib' \
+              -print -quit
+          )"
+
+          if [ -z "$built_dylib" ]; then
+            built_dylib="$(
+              find "$MOLTENVK_DIR/Package" \
+                -type f \
+                -path '*/dynamic/MoltenVK.xcframework/ios-arm64*/MoltenVK.framework/MoltenVK' \
+                -print -quit
+            )"
+          fi
+
+          if [ -z "$built_dylib" ] || [ ! -f "$built_dylib" ]; then
+            echo "No usable iOS MoltenVK dynamic binary was produced." >&2
+            echo "MoltenVK package contents:" >&2
+            find "$MOLTENVK_DIR/Package" -maxdepth 8 -type f -print | sort || true
+            exit 1
+          fi
+
+          echo "Using MoltenVK binary: $built_dylib"
+          mkdir -p "$(dirname "$MOLTENVK_TARGET_DYLIB")"
+          ditto "$built_dylib" "$MOLTENVK_TARGET_DYLIB"
+          chmod 755 "$MOLTENVK_TARGET_DYLIB"
+
+          # The XCFramework binary identifies itself as a framework. MeloNX
+          # loads a naked libMoltenVK.dylib, so normalize its install name.
+          install_name_tool -id '@rpath/libMoltenVK.dylib' "$MOLTENVK_TARGET_DYLIB"
+          codesign --remove-signature "$MOLTENVK_TARGET_DYLIB" 2>/dev/null || true
+
+          file "$MOLTENVK_TARGET_DYLIB"
+          lipo -archs "$MOLTENVK_TARGET_DYLIB" | grep -qw arm64
+          otool -D "$MOLTENVK_TARGET_DYLIB"
+          strings "$MOLTENVK_TARGET_DYLIB" > build/libMoltenVK-strings.txt
+          grep -Fq 'setPrimitiveRestartEnabled:index:' build/libMoltenVK-strings.txt
+
+          api_header="$MOLTENVK_DIR/MoltenVK/MoltenVK/API/mvk_private_api.h"
+          major="$(awk '$2 == "MVK_VERSION_MAJOR" {print $3}' "$api_header")"
+          minor="$(awk '$2 == "MVK_VERSION_MINOR" {print $3}' "$api_header")"
+          patch="$(awk '$2 == "MVK_VERSION_PATCH" {print $3}' "$api_header")"
+          version="${major}.${minor}.${patch}"
+          sha256="$(shasum -a 256 "$MOLTENVK_TARGET_DYLIB" | awk '{print $1}')"
+
+          cat > build/MoltenVK-build.txt <<EOF
+          MeloNX source commit: $GITHUB_SHA
+          MoltenVK variant: $MOLTENVK_VARIANT
+          MoltenVK repository: $MOLTENVK_REPO
+          MoltenVK commit: $MOLTENVK_COMMIT
+          MoltenVK source version: $version
+          MVK_USE_METAL_PRIVATE_API: 1
+          MVK_CONFIG_USE_METAL_PRIVATE_API build default: 1
+          libMoltenVK.dylib SHA-256: $sha256
+          EOF
+
+          cat build/MoltenVK-build.txt
+
+      - name: Verify MeloNX runtime private-API activation
+        run: |
+          set -euo pipefail
+          app_source="src/MeloNX/MeloNX/App/UI/MeloNXApp.swift"
+          grep -Fq 'EnvironmentVariable(string: "MVK_USE_METAL_PRIVATE_API", value: "1")' "$app_source"
+          grep -Fq 'EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_PRIVATE_API", value: "1")' "$app_source"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('Directory.Packages.props', 'nuget.config', '**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Install .NET iOS workload
+        run: dotnet workload install ios
+
+      - name: Resolve Swift packages
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -resolvePackageDependencies
+
+      - name: Build unsigned MeloNX app
+        run: |
+          set -euo pipefail
+          libdeps="$PWD/build/libdeps"
+          mkdir -p build
+          ln -sfn "$PWD/src/MeloNX/MeloNX/Dependencies/Dynamic Libraries" "$libdeps"
+          rm -rf "$RESULT_BUNDLE_PATH"
+
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration "$XCODE_CONFIGURATION" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -resultBundlePath "$RESULT_BUNDLE_PATH" \
+            clean build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ONLY_ACTIVE_ARCH=NO \
+            "LIBRARY_SEARCH_PATHS=\$(inherited) $libdeps" \
+            "OTHER_LDFLAGS=\$(inherited) $libdeps/Ryujinx.Headless.SDL2.dylib"
+
+      - name: Collect Xcode diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          mkdir -p build/diagnostics
+          if [ -d "$RESULT_BUNDLE_PATH" ]; then
+            xcrun xcresulttool get \
+              --path "$RESULT_BUNDLE_PATH" \
+              --format json \
+              --legacy > build/diagnostics/xcresult.json || true
+          fi
+          if [ -d "$DERIVED_DATA_PATH/Logs" ]; then
+            ditto "$DERIVED_DATA_PATH/Logs" build/diagnostics/Logs
+          fi
+
+      - name: Upload Xcode diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeloNX-custom-mvk-xcode-diagnostics
+          path: |
+            ${{ env.RESULT_BUNDLE_PATH }}
+            build/diagnostics
+          if-no-files-found: warn
+
+      - name: Package unsigned IPA and force custom dylib into app
+        run: |
+          set -euo pipefail
+          products_dir="$DERIVED_DATA_PATH/Build/Products/${XCODE_CONFIGURATION}-iphoneos"
+          app_path="$(find "$products_dir" -maxdepth 1 -name 'MeloNX.app' -type d -print -quit)"
+
+          if [ -z "$app_path" ] || [ ! -d "$app_path" ]; then
+            echo "MeloNX.app was not produced." >&2
+            exit 1
+          fi
+
+          ryujinx_dylib="$PWD/src/MeloNX/MeloNX/Dependencies/Dynamic Libraries/Ryujinx.Headless.SDL2.dylib"
+          if [ ! -f "$ryujinx_dylib" ]; then
+            ryujinx_dylib="$(
+              find "$PWD/src/Ryujinx.Headless.SDL2" "$PWD/src/MeloNX/MeloNX/Dependencies" \
+                -name 'Ryujinx.Headless.SDL2.dylib' -type f -print -quit
+            )"
+          fi
+          if [ -z "$ryujinx_dylib" ] || [ ! -f "$ryujinx_dylib" ]; then
+            echo "Ryujinx.Headless.SDL2.dylib was not produced." >&2
+            exit 1
+          fi
+
+          mkdir -p "$app_path/Frameworks"
+          ditto "$ryujinx_dylib" "$app_path/Frameworks/Ryujinx.Headless.SDL2.dylib"
+          ditto "$MOLTENVK_TARGET_DYLIB" "$app_path/Frameworks/libMoltenVK.dylib"
+          ditto build/MoltenVK-build.txt "$app_path/MoltenVK-build.txt"
+          chmod 755 "$app_path/Frameworks/Ryujinx.Headless.SDL2.dylib"
+          chmod 755 "$app_path/Frameworks/libMoltenVK.dylib"
+
+          source_hash="$(shasum -a 256 "$MOLTENVK_TARGET_DYLIB" | awk '{print $1}')"
+          embedded_hash="$(shasum -a 256 "$app_path/Frameworks/libMoltenVK.dylib" | awk '{print $1}')"
+          test "$source_hash" = "$embedded_hash"
+          lipo -archs "$app_path/Frameworks/libMoltenVK.dylib" | grep -qw arm64
+          strings "$app_path/Frameworks/libMoltenVK.dylib" > build/embedded-libMoltenVK-strings.txt
+          grep -Fq 'setPrimitiveRestartEnabled:index:' build/embedded-libMoltenVK-strings.txt
+
+          rm -rf "$IPA_OUTPUT_DIR"
+          mkdir -p "$IPA_OUTPUT_DIR/Payload"
+          ditto "$app_path" "$IPA_OUTPUT_DIR/Payload/MeloNX.app"
+          ditto \
+            "$PWD/src/MeloNX/MeloNX/MeloNX.entitlements" \
+            "$IPA_OUTPUT_DIR/MeloNX-signing-entitlements.plist"
+          ditto build/MoltenVK-build.txt "$IPA_OUTPUT_DIR/MoltenVK-build.txt"
+
+          test -f "$IPA_OUTPUT_DIR/Payload/MeloNX.app/Frameworks/libMoltenVK.dylib"
+          test -f "$IPA_OUTPUT_DIR/Payload/MeloNX.app/Frameworks/Ryujinx.Headless.SDL2.dylib"
+          test -f "$IPA_OUTPUT_DIR/Payload/MeloNX.app/MoltenVK-build.txt"
+
+          (
+            cd "$IPA_OUTPUT_DIR"
+            zip -qry MeloNX-custom-MoltenVK-unsigned.ipa Payload
+          )
+
+          shasum -a 256 "$IPA_OUTPUT_DIR/MeloNX-custom-MoltenVK-unsigned.ipa"
+          du -sh "$IPA_OUTPUT_DIR/MeloNX-custom-MoltenVK-unsigned.ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeloNX-custom-MoltenVK-${{ inputs.moltenvk_variant }}
+          path: |
+            ${{ env.IPA_OUTPUT_DIR }}/MeloNX-custom-MoltenVK-unsigned.ipa
+            ${{ env.IPA_OUTPUT_DIR }}/MeloNX-signing-entitlements.plist
+            ${{ env.IPA_OUTPUT_DIR }}/MoltenVK-build.txt
+          if-no-files-found: error
+
+      - name: Write build summary
+        if: always()
+        run: |
+          {
+            echo "## MeloNX custom MoltenVK build"
+            echo
+            echo "- MeloNX commit: \`$GITHUB_SHA\`"
+            echo "- Variant: \`${MOLTENVK_VARIANT:-unresolved}\`"
+            echo "- MoltenVK commit: \`${MOLTENVK_COMMIT:-unresolved}\`"
+            echo "- Private API compiled: \`MVK_USE_METAL_PRIVATE_API=1\`"
+            echo "- Private API runtime env: verified in MeloNXApp.swift"
+          } >> "$GITHUB_STEP_SUMMARY"
