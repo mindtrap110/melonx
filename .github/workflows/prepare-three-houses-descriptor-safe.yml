@@ -1,0 +1,154 @@
+name: Prepare Three Houses descriptor-safe branch
+run-name: Prepare Three Houses descriptor-safe branch
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Create descriptor-safe branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout serialized-shader branch
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-serialized-shaders
+          fetch-depth: 0
+
+      - name: Disable push descriptors and add pipeline diagnostics
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1) Force Ryujinx's normal descriptor-set fallback instead of
+          # VK_KHR_push_descriptor on MoltenVK.
+          config_path = Path("src/Ryujinx.Graphics.Vulkan/VulkanConfiguration.cs")
+          config = config_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+          old_config = "        public const bool UsePushDescriptors = true;"
+          new_config = "        public const bool UsePushDescriptors = false;"
+          if config.count(old_config) != 1:
+              raise SystemExit(f"Expected one UsePushDescriptors=true setting, found {config.count(old_config)}.")
+          config_path.write_text(config.replace(old_config, new_config, 1), encoding="utf-8")
+
+          # 2) Emit the actual per-program decision so the device log proves
+          # that the fallback path is active.
+          collection_path = Path("src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs")
+          collection = collection_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+          old_collection = "            UsePushDescriptors = usePushDescriptors;"
+          new_collection = (
+              "            UsePushDescriptors = usePushDescriptors;\n"
+              "            Logger.Info?.Print(LogClass.Gpu, $\"DescriptorSafe: UsePushDescriptors={usePushDescriptors}, IsCompute={IsCompute}, IsMinimal={isMinimal}.\");"
+          )
+          if collection.count(old_collection) != 1:
+              raise SystemExit(f"Expected one UsePushDescriptors assignment, found {collection.count(old_collection)}.")
+          collection_path.write_text(collection.replace(old_collection, new_collection, 1), encoding="utf-8")
+
+          # 3) Place begin/completed markers directly around Vulkan pipeline
+          # creation. A begin marker without its matching completed marker
+          # identifies a native MoltenVK/Metal failure inside that call.
+          pipeline_path = Path("src/Ryujinx.Graphics.Vulkan/PipelineState.cs")
+          pipeline = pipeline_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+          using_old = "using Ryujinx.Common.Memory;\nusing Silk.NET.Vulkan;\nusing System;\nusing System.Numerics;"
+          using_new = "using Ryujinx.Common.Logging;\nusing Ryujinx.Common.Memory;\nusing Silk.NET.Vulkan;\nusing System;\nusing System.Numerics;\nusing System.Threading;"
+          if pipeline.count(using_old) != 1:
+              raise SystemExit("Could not locate PipelineState using block exactly once.")
+          pipeline = pipeline.replace(using_old, using_new, 1)
+
+          field_old = (
+              "        private const int RequiredSubgroupSize = 32;\n"
+              "        private const int MaxDynamicStatesCount = 9;"
+          )
+          field_new = (
+              "        private const int RequiredSubgroupSize = 32;\n"
+              "        private const int MaxDynamicStatesCount = 9;\n"
+              "        private static int _nextPipelineDiagnosticId;"
+          )
+          if pipeline.count(field_old) != 1:
+              raise SystemExit("Could not locate PipelineState constant block exactly once.")
+          pipeline = pipeline.replace(field_old, field_new, 1)
+
+          compute_old = "                gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle).ThrowOnError();"
+          compute_new = '''                int pipelineDiagnosticId = Interlocked.Increment(ref _nextPipelineDiagnosticId);
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineSafe C#{pipelineDiagnosticId}: vkCreateComputePipelines begin, hasSpec={hasSpec}, specBytes={SpecializationData.Length}, pushDescriptors={program.UsePushDescriptors}.");
+
+                Result pipelineResult = gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineSafe C#{pipelineDiagnosticId}: vkCreateComputePipelines completed, result={pipelineResult}.");
+
+                pipelineResult.ThrowOnError();'''
+          if pipeline.count(compute_old) != 1:
+              raise SystemExit(f"Expected one compute pipeline call, found {pipeline.count(compute_old)}.")
+          pipeline = pipeline.replace(compute_old, compute_new, 1)
+
+          graphics_old = "                Result result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);"
+          graphics_new = '''                int pipelineDiagnosticId = Interlocked.Increment(ref _nextPipelineDiagnosticId);
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineSafe G#{pipelineDiagnosticId}: vkCreateGraphicsPipelines begin, stages={StagesCount}, topology={inputAssemblyState.Topology}, primitiveRestart={primitiveRestartEnable}, attributes={VertexAttributeDescriptionsCount}, bindings={VertexBindingDescriptionsCount}, colors={ColorBlendAttachmentStateCount}, samples={SamplesCount}, depthTest={DepthTestEnable}, depthWrite={DepthWriteEnable}, stencil={StencilTestEnable}, tessellation={HasTessellationControlShader}, pushDescriptors={program.UsePushDescriptors}.");
+
+                Result result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineSafe G#{pipelineDiagnosticId}: vkCreateGraphicsPipelines completed, result={result}.");'''
+          if pipeline.count(graphics_old) != 1:
+              raise SystemExit(f"Expected one graphics pipeline call, found {pipeline.count(graphics_old)}.")
+          pipeline = pipeline.replace(graphics_old, graphics_new, 1)
+
+          pipeline_path.write_text(pipeline, encoding="utf-8")
+          PY
+
+      - name: Verify descriptor-safe patch
+        run: |
+          set -euo pipefail
+          grep -Fq 'public const bool UsePushDescriptors = false;' \
+            src/Ryujinx.Graphics.Vulkan/VulkanConfiguration.cs
+          grep -Fq 'DescriptorSafe: UsePushDescriptors=' \
+            src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+          grep -Fq 'PipelineSafe C#' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'PipelineSafe G#' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'using System.Threading;' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          git diff --check
+          git diff -- \
+            src/Ryujinx.Graphics.Vulkan/VulkanConfiguration.cs \
+            src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs \
+            src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+
+      - name: Commit descriptor-safe branch
+        env:
+          TARGET_BRANCH: three-houses-descriptor-safe
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add \
+            src/Ryujinx.Graphics.Vulkan/VulkanConfiguration.cs \
+            src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs \
+            src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          git commit -m "Disable push descriptors and trace Vulkan pipeline creation"
+          git push --force origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Three Houses descriptor-safe branch prepared"
+            echo
+            echo "- Branch: \`three-houses-descriptor-safe\`"
+            echo "- Base: \`three-houses-serialized-shaders\`"
+            echo "- Push descriptors: disabled"
+            echo "- Pipeline creation: begin/completed diagnostics enabled"
+            echo "- Metal argument buffers: unchanged for controlled A/B testing"
+            echo
+            echo "Next: run \`iOS custom MoltenVK IPA v2\` on the new branch."
+          } >> "$GITHUB_STEP_SUMMARY"
