@@ -1,12 +1,15 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using CompareOp = Ryujinx.Graphics.GAL.CompareOp;
 using Format = Ryujinx.Graphics.GAL.Format;
 using FrontFace = Ryujinx.Graphics.GAL.FrontFace;
@@ -42,6 +45,47 @@ namespace Ryujinx.Graphics.Vulkan
         private PrimitiveTopology _topology;
 
         private ulong _currentPipelineHandle;
+
+        private static int _nextPipelineDiagnosticId;
+        private static int _nextDescriptorDiagnosticId;
+
+        [DllImport("__Internal", EntryPoint = "os_proc_available_memory")]
+        private static extern UIntPtr OsProcAvailableMemory();
+
+        private static ulong TryGetAvailableMemory()
+        {
+            try
+            {
+                return OsProcAvailableMemory().ToUInt64();
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static long TryGetWorkingSet()
+        {
+            try
+            {
+                return Process.GetCurrentProcess().WorkingSet64;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private static void LogMemoryProbe(string marker)
+        {
+            long workingSet = TryGetWorkingSet();
+            long managed = GC.GetTotalMemory(false);
+            ulong available = TryGetAvailableMemory();
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"MemoryProbe {marker}: workingSet={workingSet}, managed={managed}, available={available}.");
+        }
 
         protected Auto<DisposablePipeline> Pipeline;
 
@@ -1656,7 +1700,18 @@ namespace Ryujinx.Graphics.Vulkan
 
             Gd.Barriers.Flush(Cbs, _program, _feedbackLoop != 0, RenderPassActive, _rpHolder, EndRenderPassDelegate);
 
+            int descriptorDiagnosticId = Interlocked.Increment(ref _nextDescriptorDiagnosticId);
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind begin.");
+            LogMemoryProbe($"DescriptorProbe G#{descriptorDiagnosticId} before-update");
+
             _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind completed.");
+            LogMemoryProbe($"DescriptorProbe G#{descriptorDiagnosticId} after-update");
 
             return true;
         }
@@ -1666,27 +1721,54 @@ namespace Ryujinx.Graphics.Vulkan
             // We can only create a pipeline if the have the shader stages set.
             if (_newState.Stages != null)
             {
+                int pipelineDiagnosticId = Interlocked.Increment(ref _nextPipelineDiagnosticId);
+                string pipelineKind = pbp == PipelineBindPoint.Compute ? "C" : "G";
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: enter.");
+                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} enter");
+
                 if (pbp == PipelineBindPoint.Graphics && _renderPass == null)
                 {
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass begin.");
+                    LogMemoryProbe($"PipelineProbe G#{pipelineDiagnosticId} before-render-pass");
+
                     CreateRenderPass();
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass completed.");
+                    LogMemoryProbe($"PipelineProbe G#{pipelineDiagnosticId} after-render-pass");
                 }
 
                 if (!_program.IsLinked)
                 {
-                    // Background compile failed, we likely can't create the pipeline because the shader is broken
-                    // or the driver failed to compile it.
+                    Logger.Error?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: program not linked.");
 
                     return false;
                 }
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create begin.");
+                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-native-create");
 
                 var pipeline = pbp == PipelineBindPoint.Compute
                     ? _newState.CreateComputePipeline(Gd, Device, _program, PipelineCache)
                     : _newState.CreateGraphicsPipeline(Gd, Device, _program, PipelineCache, _renderPass.Get(Cbs).Value);
 
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create returned, null={pipeline == null}.");
+                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-native-create");
+
                 if (pipeline == null)
                 {
-                    // Host failed to create the pipeline, likely due to driver bugs.
-
                     return false;
                 }
 
@@ -1698,7 +1780,18 @@ namespace Ryujinx.Graphics.Vulkan
                     Pipeline = pipeline;
 
                     PauseTransformFeedbackInternal();
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline begin.");
+                    LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-bind");
+
                     Gd.Api.CmdBindPipeline(CommandBuffer, pbp, Pipeline.Get(Cbs).Value);
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline completed.");
+                    LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-bind");
                 }
             }
 
