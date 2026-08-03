@@ -1,0 +1,285 @@
+name: Prepare Three Houses memory and pipeline probe branch
+run-name: Prepare Three Houses memory and pipeline probe branch
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Create memory-pipeline probe branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout serialized-shader branch
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-serialized-shaders
+          fetch-depth: 0
+
+      - name: Add pipeline and memory diagnostics
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/Ryujinx.Graphics.Vulkan/PipelineBase.cs")
+          text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+          using_old = "using Ryujinx.Graphics.GAL;"
+          using_new = "using Ryujinx.Common.Logging;\nusing Ryujinx.Graphics.GAL;"
+          if text.count(using_old) != 1:
+              raise SystemExit("Could not locate the PipelineBase Ryujinx using block exactly once.")
+          text = text.replace(using_old, using_new, 1)
+
+          system_using_old = "using System;\nusing System.Collections.Generic;"
+          system_using_new = "using System;\nusing System.Collections.Generic;\nusing System.Diagnostics;"
+          if text.count(system_using_old) != 1:
+              raise SystemExit("Could not locate the PipelineBase System using block exactly once.")
+          text = text.replace(system_using_old, system_using_new, 1)
+
+          threading_using_old = "using System.Runtime.InteropServices;"
+          threading_using_new = "using System.Runtime.InteropServices;\nusing System.Threading;"
+          if text.count(threading_using_old) != 1:
+              raise SystemExit("Could not locate System.Runtime.InteropServices exactly once.")
+          text = text.replace(threading_using_old, threading_using_new, 1)
+
+          field_old = "        private ulong _currentPipelineHandle;\n\n        protected Auto<DisposablePipeline> Pipeline;"
+          field_new = '''        private ulong _currentPipelineHandle;
+
+        private static int _nextPipelineDiagnosticId;
+        private static int _nextDescriptorDiagnosticId;
+
+        [DllImport("__Internal", EntryPoint = "os_proc_available_memory")]
+        private static extern UIntPtr OsProcAvailableMemory();
+
+        private static ulong TryGetAvailableMemory()
+        {
+            try
+            {
+                return OsProcAvailableMemory().ToUInt64();
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static long TryGetWorkingSet()
+        {
+            try
+            {
+                return Process.GetCurrentProcess().WorkingSet64;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private static void LogMemoryProbe(string marker)
+        {
+            long workingSet = TryGetWorkingSet();
+            long managed = GC.GetTotalMemory(false);
+            ulong available = TryGetAvailableMemory();
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"MemoryProbe {marker}: workingSet={workingSet}, managed={managed}, available={available}.");
+        }
+
+        protected Auto<DisposablePipeline> Pipeline;'''
+          if text.count(field_old) != 1:
+              raise SystemExit("Could not locate the PipelineBase diagnostic field insertion point exactly once.")
+          text = text.replace(field_old, field_new, 1)
+
+          descriptor_old = '''            _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
+
+            return true;'''
+          descriptor_new = '''            int descriptorDiagnosticId = Interlocked.Increment(ref _nextDescriptorDiagnosticId);
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind begin.");
+            LogMemoryProbe($"DescriptorProbe G#{descriptorDiagnosticId} before-update");
+
+            _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind completed.");
+            LogMemoryProbe($"DescriptorProbe G#{descriptorDiagnosticId} after-update");
+
+            return true;'''
+          if text.count(descriptor_old) != 1:
+              raise SystemExit("Could not locate the graphics descriptor update block exactly once.")
+          text = text.replace(descriptor_old, descriptor_new, 1)
+
+          create_old = '''        private bool CreatePipeline(PipelineBindPoint pbp)
+        {
+            // We can only create a pipeline if the have the shader stages set.
+            if (_newState.Stages != null)
+            {
+                if (pbp == PipelineBindPoint.Graphics && _renderPass == null)
+                {
+                    CreateRenderPass();
+                }
+
+                if (!_program.IsLinked)
+                {
+                    // Background compile failed, we likely can't create the pipeline because the shader is broken
+                    // or the driver failed to compile it.
+
+                    return false;
+                }
+
+                var pipeline = pbp == PipelineBindPoint.Compute
+                    ? _newState.CreateComputePipeline(Gd, Device, _program, PipelineCache)
+                    : _newState.CreateGraphicsPipeline(Gd, Device, _program, PipelineCache, _renderPass.Get(Cbs).Value);
+
+                if (pipeline == null)
+                {
+                    // Host failed to create the pipeline, likely due to driver bugs.
+
+                    return false;
+                }
+
+                ulong pipelineHandle = pipeline.GetUnsafe().Value.Handle;
+
+                if (_currentPipelineHandle != pipelineHandle)
+                {
+                    _currentPipelineHandle = pipelineHandle;
+                    Pipeline = pipeline;
+
+                    PauseTransformFeedbackInternal();
+                    Gd.Api.CmdBindPipeline(CommandBuffer, pbp, Pipeline.Get(Cbs).Value);
+                }
+            }
+
+            return true;
+        }'''
+          create_new = '''        private bool CreatePipeline(PipelineBindPoint pbp)
+        {
+            // We can only create a pipeline if the have the shader stages set.
+            if (_newState.Stages != null)
+            {
+                int pipelineDiagnosticId = Interlocked.Increment(ref _nextPipelineDiagnosticId);
+                string pipelineKind = pbp == PipelineBindPoint.Compute ? "C" : "G";
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: enter.");
+                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} enter");
+
+                if (pbp == PipelineBindPoint.Graphics && _renderPass == null)
+                {
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass begin.");
+                    LogMemoryProbe($"PipelineProbe G#{pipelineDiagnosticId} before-render-pass");
+
+                    CreateRenderPass();
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass completed.");
+                    LogMemoryProbe($"PipelineProbe G#{pipelineDiagnosticId} after-render-pass");
+                }
+
+                if (!_program.IsLinked)
+                {
+                    Logger.Error?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: program not linked.");
+
+                    return false;
+                }
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create begin.");
+                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-native-create");
+
+                var pipeline = pbp == PipelineBindPoint.Compute
+                    ? _newState.CreateComputePipeline(Gd, Device, _program, PipelineCache)
+                    : _newState.CreateGraphicsPipeline(Gd, Device, _program, PipelineCache, _renderPass.Get(Cbs).Value);
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create returned, null={pipeline == null}.");
+                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-native-create");
+
+                if (pipeline == null)
+                {
+                    return false;
+                }
+
+                ulong pipelineHandle = pipeline.GetUnsafe().Value.Handle;
+
+                if (_currentPipelineHandle != pipelineHandle)
+                {
+                    _currentPipelineHandle = pipelineHandle;
+                    Pipeline = pipeline;
+
+                    PauseTransformFeedbackInternal();
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline begin.");
+                    LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-bind");
+
+                    Gd.Api.CmdBindPipeline(CommandBuffer, pbp, Pipeline.Get(Cbs).Value);
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline completed.");
+                    LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-bind");
+                }
+            }
+
+            return true;
+        }'''
+          if text.count(create_old) != 1:
+              raise SystemExit("Could not locate the PipelineBase CreatePipeline method exactly once.")
+          text = text.replace(create_old, create_new, 1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Verify diagnostic patch
+        run: |
+          set -euo pipefail
+          grep -Fq 'using Ryujinx.Common.Logging;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'MemoryProbe' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'PipelineProbe' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'DescriptorProbe' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'os_proc_available_memory' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'native create begin' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+
+      - name: Commit probe branch
+        env:
+          TARGET_BRANCH: three-houses-memory-pipeline-probe
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          git commit -m "Add iOS memory and Vulkan pipeline diagnostics"
+          git push --force origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Three Houses memory-pipeline probe branch prepared"
+            echo
+            echo "- Branch: \`three-houses-memory-pipeline-probe\`"
+            echo "- Base: \`three-houses-serialized-shaders\`"
+            echo "- Adds: MemoryProbe, PipelineProbe, DescriptorProbe diagnostics"
+            echo "- Does not disable push descriptors or alter pipeline behavior"
+            echo
+            echo "Next: build \`iOS custom MoltenVK IPA v2\` on this branch, then repack increased memory."
+          } >> "$GITHUB_STEP_SUMMARY"
