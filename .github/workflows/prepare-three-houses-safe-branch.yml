@@ -1,0 +1,83 @@
+name: Prepare Three Houses safe pipeline branch
+run-name: Prepare Three Houses safe pipeline branch
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Create targeted safe-pipeline branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout XC-ios-ht
+        uses: actions/checkout@v4
+        with:
+          ref: XC-ios-ht
+          fetch-depth: 0
+
+      - name: Patch background pipeline compilation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs")
+          text = path.read_text(encoding="utf-8")
+
+          old = """            _compileTask = BackgroundCompilation();
+                      _firstBackgroundUse = !fromCache;
+          """
+          new = """            // MoltenVK/iOS compatibility mode: avoid concurrent background
+                      // VkGraphicsPipeline creation while the first real draw is also creating
+                      // pipelines on the render thread. Some Apple Metal driver failures terminate
+                      // the process below managed exception handling, leaving an abruptly ended log.
+                      _compileTask = Task.CompletedTask;
+                      _firstBackgroundUse = false;
+                      Logger.Info?.Print(LogClass.Gpu, \"Three Houses safe mode: background pipeline precompilation disabled.\");
+          """
+
+          if old not in text:
+              raise SystemExit("Expected ShaderCollection constructor block was not found; refusing to patch.")
+
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Verify targeted patch
+        run: |
+          set -euo pipefail
+          grep -Fq 'Three Houses safe mode: background pipeline precompilation disabled.' \
+            src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+          if grep -Fq '_compileTask = BackgroundCompilation();' \
+            src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs; then
+            echo "Background compilation call still exists in the patched constructor." >&2
+            exit 1
+          fi
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+
+      - name: Commit safe branch
+        env:
+          TARGET_BRANCH: three-houses-safe-pipeline
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+          git commit -m "Disable background Vulkan pipeline precompile on iOS safe build"
+          git push --force-with-lease origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Three Houses safe pipeline branch prepared"
+            echo
+            echo "- Branch: \`three-houses-safe-pipeline\`"
+            echo "- Change: background Vulkan pipeline precompilation disabled"
+            echo "- Unchanged: JIT, memory manager, MoltenVK selection, push descriptors, game data"
+            echo
+            echo "Run \`iOS custom MoltenVK IPA v2\` on this branch next."
+          } >> "$GITHUB_STEP_SUMMARY"
