@@ -1,0 +1,229 @@
+name: Repack MeloNX with increased memory entitlement
+run-name: Repack MeloNX increased memory (${{ inputs.source_run_id || 'latest successful v2' }})
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Optional successful v2 workflow run ID; leave blank to use the latest successful v2 run
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ios-repack-increased-memory-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repack:
+    name: Ad-hoc sign IPA with increased-memory entitlement
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Resolve source workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+
+          run_id="$(printf '%s' "$REQUESTED_RUN_ID" | tr -d '[:space:]')"
+          if [ -z "$run_id" ]; then
+            run_id="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow ios-custom-moltenvk-ipa-v2.yml \
+                --branch "$GITHUB_REF_NAME" \
+                --status success \
+                --limit 1 \
+                --json databaseId \
+                --jq '.[0].databaseId'
+            )"
+          fi
+
+          if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "Could not resolve a successful v2 workflow run ID." >&2
+            exit 1
+          fi
+
+          echo "SOURCE_RUN_ID=$run_id" >> "$GITHUB_ENV"
+          echo "Using source run: $run_id"
+
+      - name: Download source IPA artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf source
+          mkdir -p source
+
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir source
+
+          source_ipa="$(find source -type f -name 'MeloNX-custom-MoltenVK-unsigned.ipa' -print -quit)"
+          if [ -z "$source_ipa" ] || [ ! -f "$source_ipa" ]; then
+            echo "The selected run did not contain MeloNX-custom-MoltenVK-unsigned.ipa." >&2
+            find source -maxdepth 4 -type f -print | sort >&2 || true
+            exit 1
+          fi
+
+          echo "SOURCE_IPA=$source_ipa" >> "$GITHUB_ENV"
+          echo "Using source IPA: $source_ipa"
+          shasum -a 256 "$source_ipa"
+
+      - name: Unpack IPA and create sideload entitlements
+        run: |
+          set -euo pipefail
+          rm -rf work output
+          mkdir -p work output
+          unzip -q "$SOURCE_IPA" -d work
+
+          app_path="$(find work/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$app_path" ] || [ ! -d "$app_path" ]; then
+            echo "No .app bundle was found in the IPA." >&2
+            exit 1
+          fi
+          echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
+
+          cat > output/MeloNX-sideload.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.developer.kernel.increased-memory-limit</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          plutil -lint output/MeloNX-sideload.entitlements
+
+          # Remove stale signatures/provisioning data before creating a clean
+          # ad-hoc signature that AltStore 2.2+ can inspect and re-sign.
+          find "$app_path" -type d -name '_CodeSignature' -prune -exec rm -rf {} +
+          find "$app_path" -type f -name 'embedded.mobileprovision' -delete
+
+      - name: Ad-hoc sign nested code and app
+        run: |
+          set -euo pipefail
+
+          python3 - "$APP_PATH" <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          app = Path(sys.argv[1]).resolve()
+
+          # Sign every Mach-O file first, including loose dylibs and framework
+          # executables. The app bundle itself is signed last with entitlements.
+          mach_o_files = []
+          for path in app.rglob("*"):
+              if not path.is_file() or path.is_symlink():
+                  continue
+              result = subprocess.run(
+                  ["file", "-b", str(path)],
+                  check=True,
+                  text=True,
+                  capture_output=True,
+              )
+              if "Mach-O" in result.stdout:
+                  mach_o_files.append(path)
+
+          for path in sorted(mach_o_files, key=lambda item: len(item.parts), reverse=True):
+              print(f"Signing Mach-O: {path}")
+              subprocess.run(
+                  ["codesign", "--force", "--sign", "-", "--timestamp=none", str(path)],
+                  check=True,
+              )
+
+          # Sign nested code bundles from deepest to shallowest.
+          bundle_suffixes = {".framework", ".appex", ".xpc"}
+          bundles = [
+              path for path in app.rglob("*")
+              if path.is_dir() and path.suffix in bundle_suffixes
+          ]
+          for path in sorted(bundles, key=lambda item: len(item.parts), reverse=True):
+              print(f"Signing bundle: {path}")
+              subprocess.run(
+                  ["codesign", "--force", "--sign", "-", "--timestamp=none", str(path)],
+                  check=True,
+              )
+          PY
+
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            --generate-entitlement-der \
+            --entitlements output/MeloNX-sideload.entitlements \
+            "$APP_PATH"
+
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+      - name: Verify embedded increased-memory entitlement
+        run: |
+          set -euo pipefail
+
+          codesign -d --entitlements :- "$APP_PATH" \
+            > output/MeloNX-embedded-entitlements.plist \
+            2> output/codesign-display.txt
+
+          plutil -lint output/MeloNX-embedded-entitlements.plist
+          entitlement_value="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :com.apple.developer.kernel.increased-memory-limit' \
+              output/MeloNX-embedded-entitlements.plist
+          )"
+
+          if [ "$entitlement_value" != "true" ]; then
+            echo "Increased Memory Limit entitlement was not embedded." >&2
+            cat output/MeloNX-embedded-entitlements.plist >&2
+            exit 1
+          fi
+
+          echo "Verified: com.apple.developer.kernel.increased-memory-limit = true"
+          cat output/MeloNX-embedded-entitlements.plist
+
+      - name: Repack IPA
+        run: |
+          set -euo pipefail
+
+          output_ipa="$PWD/output/MeloNX-custom-MoltenVK-increased-memory.ipa"
+          (
+            cd work
+            zip -qry "$output_ipa" Payload
+          )
+
+          test -f "$output_ipa"
+          shasum -a 256 "$output_ipa" | tee output/IPA-SHA256.txt
+          du -sh "$output_ipa"
+
+          # Preserve the MoltenVK build manifest from the source artifact when available.
+          source_manifest="$(find source -type f -name 'MoltenVK-build.txt' -print -quit)"
+          if [ -n "$source_manifest" ] && [ -f "$source_manifest" ]; then
+            cp "$source_manifest" output/MoltenVK-build.txt
+          fi
+
+      - name: Upload entitlement-ready IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeloNX-custom-MoltenVK-increased-memory
+          path: output
+          if-no-files-found: error
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## MeloNX increased-memory repack"
+            echo
+            echo "- Source workflow run: \`${SOURCE_RUN_ID:-unresolved}\`"
+            echo "- Entitlement: \`com.apple.developer.kernel.increased-memory-limit = true\`"
+            echo "- Signing: ad-hoc before AltStore re-signing"
+            echo "- Output: \`MeloNX-custom-MoltenVK-increased-memory.ipa\`"
+          } >> "$GITHUB_STEP_SUMMARY"
