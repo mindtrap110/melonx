@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Silk.NET.Vulkan;
@@ -7,6 +8,7 @@ using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using CompareOp = Ryujinx.Graphics.GAL.CompareOp;
 using Format = Ryujinx.Graphics.GAL.Format;
 using FrontFace = Ryujinx.Graphics.GAL.FrontFace;
@@ -42,6 +44,15 @@ namespace Ryujinx.Graphics.Vulkan
         private PrimitiveTopology _topology;
 
         private ulong _currentPipelineHandle;
+
+        private static int _nextPipelineAbId;
+        private static int _nextDescriptorAbId;
+        private const int PipelineThrottleMilliseconds = 0;
+
+        private static bool ShouldLogPipelineAb(int id)
+        {
+            return id <= 20 || id % 100 == 0;
+        }
 
         protected Auto<DisposablePipeline> Pipeline;
 
@@ -1656,7 +1667,24 @@ namespace Ryujinx.Graphics.Vulkan
 
             Gd.Barriers.Flush(Cbs, _program, _feedbackLoop != 0, RenderPassActive, _rpHolder, EndRenderPassDelegate);
 
+            int descriptorAbId = Interlocked.Increment(ref _nextDescriptorAbId);
+            bool logDescriptorAb = ShouldLogPipelineAb(descriptorAbId);
+
+            if (logDescriptorAb)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineAB Descriptor G#{descriptorAbId}: begin.");
+            }
+
             _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
+
+            if (logDescriptorAb)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"PipelineAB Descriptor G#{descriptorAbId}: completed.");
+            }
 
             return true;
         }
@@ -1666,6 +1694,17 @@ namespace Ryujinx.Graphics.Vulkan
             // We can only create a pipeline if the have the shader stages set.
             if (_newState.Stages != null)
             {
+                int pipelineAbId = Interlocked.Increment(ref _nextPipelineAbId);
+                string pipelineKind = pbp == PipelineBindPoint.Compute ? "C" : "G";
+                bool logPipelineAb = ShouldLogPipelineAb(pipelineAbId);
+
+                if (logPipelineAb)
+                {
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineAB {pipelineKind}#{pipelineAbId}: enter throttleMs={PipelineThrottleMilliseconds}.");
+                }
+
                 if (pbp == PipelineBindPoint.Graphics && _renderPass == null)
                 {
                     CreateRenderPass();
@@ -1673,20 +1712,41 @@ namespace Ryujinx.Graphics.Vulkan
 
                 if (!_program.IsLinked)
                 {
-                    // Background compile failed, we likely can't create the pipeline because the shader is broken
-                    // or the driver failed to compile it.
+                    if (logPipelineAb)
+                    {
+                        Logger.Error?.Print(
+                            LogClass.Gpu,
+                            $"PipelineAB {pipelineKind}#{pipelineAbId}: program not linked.");
+                    }
 
                     return false;
+                }
+
+                if (PipelineThrottleMilliseconds > 0)
+                {
+                    Thread.Sleep(PipelineThrottleMilliseconds);
+                }
+
+                if (logPipelineAb)
+                {
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineAB {pipelineKind}#{pipelineAbId}: native create begin.");
                 }
 
                 var pipeline = pbp == PipelineBindPoint.Compute
                     ? _newState.CreateComputePipeline(Gd, Device, _program, PipelineCache)
                     : _newState.CreateGraphicsPipeline(Gd, Device, _program, PipelineCache, _renderPass.Get(Cbs).Value);
 
+                if (logPipelineAb)
+                {
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"PipelineAB {pipelineKind}#{pipelineAbId}: native create returned null={pipeline == null}.");
+                }
+
                 if (pipeline == null)
                 {
-                    // Host failed to create the pipeline, likely due to driver bugs.
-
                     return false;
                 }
 
@@ -1699,6 +1759,13 @@ namespace Ryujinx.Graphics.Vulkan
 
                     PauseTransformFeedbackInternal();
                     Gd.Api.CmdBindPipeline(CommandBuffer, pbp, Pipeline.Get(Cbs).Value);
+
+                    if (logPipelineAb)
+                    {
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"PipelineAB {pipelineKind}#{pipelineAbId}: bind completed.");
+                    }
                 }
             }
 
