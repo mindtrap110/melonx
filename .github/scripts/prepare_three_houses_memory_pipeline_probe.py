@@ -2,7 +2,6 @@
 
 from pathlib import Path
 import sys
-import textwrap
 
 
 def exact_replace(text: str, old: str, new: str, description: str) -> str:
@@ -10,10 +9,6 @@ def exact_replace(text: str, old: str, new: str, description: str) -> str:
     if count != 1:
         raise SystemExit(f"Expected exactly one {description}, found {count}.")
     return text.replace(old, new, 1)
-
-
-def block(value: str) -> str:
-    return textwrap.dedent(value).lstrip("\n")
 
 
 root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
@@ -41,22 +36,11 @@ text = exact_replace(
     "System.Runtime.InteropServices using",
 )
 
-field_old = block(
-    """
-        private ulong _currentPipelineHandle;
-
-        protected Auto<DisposablePipeline> Pipeline;
-    """
-)
-
-field_new = block(
-    """
-        private ulong _currentPipelineHandle;
-
-        private static int _nextPipelineDiagnosticId;
+field_marker = "        protected Auto<DisposablePipeline> Pipeline;"
+field_diagnostics = """        private static int _nextPipelineDiagnosticId;
         private static int _nextDescriptorDiagnosticId;
 
-        [DllImport("__Internal", EntryPoint = "os_proc_available_memory")]
+        [DllImport(\"__Internal\", EntryPoint = \"os_proc_available_memory\")]
         private static extern UIntPtr OsProcAvailableMemory();
 
         private static ulong TryGetAvailableMemory()
@@ -91,135 +75,88 @@ field_new = block(
 
             Logger.Info?.Print(
                 LogClass.Gpu,
-                $"MemoryProbe {marker}: workingSet={workingSet}, managed={managed}, available={available}.");
+                $\"MemoryProbe {marker}: workingSet={workingSet}, managed={managed}, available={available}.\");
         }
 
-        protected Auto<DisposablePipeline> Pipeline;
-    """
+"""
+text = exact_replace(
+    text,
+    field_marker,
+    field_diagnostics + field_marker,
+    "diagnostic field insertion point",
 )
 
-text = exact_replace(text, field_old, field_new, "diagnostic field insertion point")
-
-descriptor_old = block(
-    """
-            _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
-
-            return true;
-    """
-)
-
-descriptor_new = block(
-    """
-            int descriptorDiagnosticId = Interlocked.Increment(ref _nextDescriptorDiagnosticId);
+descriptor_call = "            _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);"
+descriptor_probe = """            int descriptorDiagnosticId = Interlocked.Increment(ref _nextDescriptorDiagnosticId);
             Logger.Info?.Print(
                 LogClass.Gpu,
-                $"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind begin.");
-            LogMemoryProbe($"DescriptorProbe G#{descriptorDiagnosticId} before-update");
+                $\"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind begin.\");
+            LogMemoryProbe($\"DescriptorProbe G#{descriptorDiagnosticId} before-update\");
 
             _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
 
             Logger.Info?.Print(
                 LogClass.Gpu,
-                $"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind completed.");
-            LogMemoryProbe($"DescriptorProbe G#{descriptorDiagnosticId} after-update");
-
-            return true;
-    """
+                $\"DescriptorProbe G#{descriptorDiagnosticId}: update-and-bind completed.\");
+            LogMemoryProbe($\"DescriptorProbe G#{descriptorDiagnosticId} after-update\");"""
+text = exact_replace(
+    text,
+    descriptor_call,
+    descriptor_probe,
+    "graphics descriptor update call",
 )
 
-text = exact_replace(text, descriptor_old, descriptor_new, "graphics descriptor update block")
+method_start_marker = "        private bool CreatePipeline(PipelineBindPoint pbp)\n        {"
+method_end_marker = "\n        private unsafe void BeginRenderPass()"
 
-create_old = block(
-    """
-        private bool CreatePipeline(PipelineBindPoint pbp)
-        {
-            // We can only create a pipeline if the have the shader stages set.
-            if (_newState.Stages != null)
-            {
-                if (pbp == PipelineBindPoint.Graphics && _renderPass == null)
-                {
-                    CreateRenderPass();
-                }
+start_count = text.count(method_start_marker)
+if start_count != 1:
+    raise SystemExit(f"Expected exactly one CreatePipeline start marker, found {start_count}.")
 
-                if (!_program.IsLinked)
-                {
-                    // Background compile failed, we likely can't create the pipeline because the shader is broken
-                    // or the driver failed to compile it.
+start = text.index(method_start_marker)
+end = text.index(method_end_marker, start)
 
-                    return false;
-                }
-
-                var pipeline = pbp == PipelineBindPoint.Compute
-                    ? _newState.CreateComputePipeline(Gd, Device, _program, PipelineCache)
-                    : _newState.CreateGraphicsPipeline(Gd, Device, _program, PipelineCache, _renderPass.Get(Cbs).Value);
-
-                if (pipeline == null)
-                {
-                    // Host failed to create the pipeline, likely due to driver bugs.
-
-                    return false;
-                }
-
-                ulong pipelineHandle = pipeline.GetUnsafe().Value.Handle;
-
-                if (_currentPipelineHandle != pipelineHandle)
-                {
-                    _currentPipelineHandle = pipelineHandle;
-                    Pipeline = pipeline;
-
-                    PauseTransformFeedbackInternal();
-                    Gd.Api.CmdBindPipeline(CommandBuffer, pbp, Pipeline.Get(Cbs).Value);
-                }
-            }
-
-            return true;
-        }
-    """
-)
-
-create_new = block(
-    """
-        private bool CreatePipeline(PipelineBindPoint pbp)
+create_pipeline_method = """        private bool CreatePipeline(PipelineBindPoint pbp)
         {
             // We can only create a pipeline if the have the shader stages set.
             if (_newState.Stages != null)
             {
                 int pipelineDiagnosticId = Interlocked.Increment(ref _nextPipelineDiagnosticId);
-                string pipelineKind = pbp == PipelineBindPoint.Compute ? "C" : "G";
+                string pipelineKind = pbp == PipelineBindPoint.Compute ? \"C\" : \"G\";
 
                 Logger.Info?.Print(
                     LogClass.Gpu,
-                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: enter.");
-                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} enter");
+                    $\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: enter.\");
+                LogMemoryProbe($\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} enter\");
 
                 if (pbp == PipelineBindPoint.Graphics && _renderPass == null)
                 {
                     Logger.Info?.Print(
                         LogClass.Gpu,
-                        $"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass begin.");
-                    LogMemoryProbe($"PipelineProbe G#{pipelineDiagnosticId} before-render-pass");
+                        $\"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass begin.\");
+                    LogMemoryProbe($\"PipelineProbe G#{pipelineDiagnosticId} before-render-pass\");
 
                     CreateRenderPass();
 
                     Logger.Info?.Print(
                         LogClass.Gpu,
-                        $"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass completed.");
-                    LogMemoryProbe($"PipelineProbe G#{pipelineDiagnosticId} after-render-pass");
+                        $\"PipelineProbe G#{pipelineDiagnosticId}: CreateRenderPass completed.\");
+                    LogMemoryProbe($\"PipelineProbe G#{pipelineDiagnosticId} after-render-pass\");
                 }
 
                 if (!_program.IsLinked)
                 {
                     Logger.Error?.Print(
                         LogClass.Gpu,
-                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: program not linked.");
+                        $\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: program not linked.\");
 
                     return false;
                 }
 
                 Logger.Info?.Print(
                     LogClass.Gpu,
-                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create begin.");
-                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-native-create");
+                    $\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create begin.\");
+                LogMemoryProbe($\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-native-create\");
 
                 var pipeline = pbp == PipelineBindPoint.Compute
                     ? _newState.CreateComputePipeline(Gd, Device, _program, PipelineCache)
@@ -227,8 +164,8 @@ create_new = block(
 
                 Logger.Info?.Print(
                     LogClass.Gpu,
-                    $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create returned, null={pipeline == null}.");
-                LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-native-create");
+                    $\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: native create returned, null={pipeline == null}.\");
+                LogMemoryProbe($\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-native-create\");
 
                 if (pipeline == null)
                 {
@@ -246,22 +183,21 @@ create_new = block(
 
                     Logger.Info?.Print(
                         LogClass.Gpu,
-                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline begin.");
-                    LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-bind");
+                        $\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline begin.\");
+                    LogMemoryProbe($\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} before-bind\");
 
                     Gd.Api.CmdBindPipeline(CommandBuffer, pbp, Pipeline.Get(Cbs).Value);
 
                     Logger.Info?.Print(
                         LogClass.Gpu,
-                        $"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline completed.");
-                    LogMemoryProbe($"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-bind");
+                        $\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId}: CmdBindPipeline completed.\");
+                    LogMemoryProbe($\"PipelineProbe {pipelineKind}#{pipelineDiagnosticId} after-bind\");
                 }
             }
 
             return true;
         }
-    """
-)
+"""
 
-text = exact_replace(text, create_old, create_new, "PipelineBase CreatePipeline method")
+text = text[:start] + create_pipeline_method + text[end:]
 path.write_text(text, encoding="utf-8")
