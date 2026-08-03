@@ -26,7 +26,7 @@ jobs:
           from pathlib import Path
 
           path = Path("src/Ryujinx.Graphics.Vulkan/Shader.cs")
-          text = path.read_text(encoding="utf-8")
+          text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
           using_old = "using System.Runtime.InteropServices;\nusing System.Threading.Tasks;"
           using_new = "using System.Runtime.InteropServices;\nusing System.Threading;\nusing System.Threading.Tasks;"
@@ -44,38 +44,18 @@ jobs:
               raise SystemExit("Could not locate the shader options lock exactly once.")
           text = text.replace(field_old, field_new, 1)
 
-          old = '''            CompileTask = Task.Run(() =>
-            {
-                byte[] spirv = shaderSource.BinaryCode;
+          task_start = "            CompileTask = Task.Run(() =>\n            {"
+          task_end = "\n            });\n        }\n\n        private unsafe static byte[] GlslToSpirv"
 
-                if (spirv == null)
-                {
-                    spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
+          if text.count(task_start) != 1:
+              raise SystemExit(
+                  f"Expected exactly one Shader CompileTask start marker, found {text.count(task_start)}."
+              )
 
-                    if (spirv == null)
-                    {
-                        CompileStatus = ProgramLinkStatus.Failure;
+          start = text.index(task_start)
+          end = text.index(task_end, start)
 
-                        return;
-                    }
-                }
-
-                fixed (byte* pCode = spirv)
-                {
-                    var shaderModuleCreateInfo = new ShaderModuleCreateInfo
-                    {
-                        SType = StructureType.ShaderModuleCreateInfo,
-                        CodeSize = (uint)spirv.Length,
-                        PCode = (uint*)pCode,
-                    };
-
-                    api.CreateShaderModule(device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
-                }
-
-                CompileStatus = ProgramLinkStatus.Success;
-            });'''
-
-          new = '''            int shaderDiagnosticId = Interlocked.Increment(ref _nextShaderDiagnosticId);
+          new_task = '''            int shaderDiagnosticId = Interlocked.Increment(ref _nextShaderDiagnosticId);
 
             CompileTask = Task.Run(() =>
             {
@@ -139,20 +119,19 @@ jobs:
                 }
             });'''
 
-          matches = text.count(old)
-          if matches != 1:
-              raise SystemExit(f"Expected exactly one Shader CompileTask block, found {matches}.")
-
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          text = text[:start] + new_task + text[end + len("\n            });"):]
+          path.write_text(text, encoding="utf-8")
           PY
 
       - name: Verify serialized shader patch
         run: |
           set -euo pipefail
+          grep -Fq 'using System.Threading;' src/Ryujinx.Graphics.Vulkan/Shader.cs
           grep -Fq 'private static readonly object _shaderCompileLock = new();' \
             src/Ryujinx.Graphics.Vulkan/Shader.cs
           grep -Fq 'ShaderSafe #' src/Ryujinx.Graphics.Vulkan/Shader.cs
           grep -Fq 'lock (_shaderCompileLock)' src/Ryujinx.Graphics.Vulkan/Shader.cs
+          grep -Fq 'private unsafe static byte[] GlslToSpirv' src/Ryujinx.Graphics.Vulkan/Shader.cs
           git diff --check
           git diff -- src/Ryujinx.Graphics.Vulkan/Shader.cs
 
