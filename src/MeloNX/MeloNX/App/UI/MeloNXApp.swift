@@ -33,10 +33,21 @@ struct MeloNXApp: View {
     let environment: [EnvironmentVariable] = [
         EnvironmentVariable(string: "MVK_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_PRIVATE_API", value: "1"),
-        EnvironmentVariable(string: "MVK_DEBUG", value: "0"),
-        // EnvironmentVariable(string: "MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", value: "0"),
-        EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "128"),
-        // EnvironmentVariable(string: "MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM", value: "4"),
+        EnvironmentVariable(string: "MVK_CONFIG_DEBUG", value: "0"),
+        EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "2"),
+
+        // Three Houses can create and submit a large burst of GPU work during
+        // startup. Keep the number of in-flight Metal command buffers aligned
+        // with Ryujinx's 16-command-buffer pool instead of the previous 128.
+        EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "16"),
+
+        // Mode 2 encodes commands immediately and drains an autorelease pool for
+        // each command. MoltenVK documents this as its smallest-footprint mode.
+        EnvironmentVariable(string: "MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", value: "2"),
+
+        // Compress retained MSL source in the Vulkan pipeline cache using LZFSE.
+        EnvironmentVariable(string: "MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM", value: "1"),
+        EnvironmentVariable(string: "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", value: "1"),
         EnvironmentVariable(string: "DOTNET_DefaultStackSize", value: "200000") // probably doesn't work on NativeAOT
     ]
     
@@ -157,4 +168,3 @@ struct MeloNXApp: View {
         }
     }
 }
-
