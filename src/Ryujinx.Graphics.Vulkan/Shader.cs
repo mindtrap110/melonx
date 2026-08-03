@@ -5,6 +5,7 @@ using shaderc;
 using Silk.NET.Vulkan;
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Ryujinx.Graphics.Vulkan
@@ -14,6 +15,8 @@ namespace Ryujinx.Graphics.Vulkan
         // The shaderc.net dependency's Options constructor and dispose are not thread safe.
         // Take this lock when using them.
         private static readonly object _shaderOptionsLock = new();
+        private static readonly object _shaderCompileLock = new();
+        private static int _nextShaderDiagnosticId;
 
         private static readonly IntPtr _ptrMainEntryPointName = Marshal.StringToHGlobalAnsi("main");
 
@@ -39,36 +42,69 @@ namespace Ryujinx.Graphics.Vulkan
 
             _stage = shaderSource.Stage.Convert();
 
-            CompileTask = Task.Run(() =>
-            {
-                byte[] spirv = shaderSource.BinaryCode;
+            int shaderDiagnosticId = Interlocked.Increment(ref _nextShaderDiagnosticId);
 
-                if (spirv == null)
-                {
-                    spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
+  CompileTask = Task.Run(() =>
+  {
+      // MoltenVK performs SPIR-V conversion while Vulkan shader modules are created.
+      // Serialize this path on iOS so the initial shader burst cannot issue dozens of
+      // concurrent native conversion/module-creation operations into Metal.
+      lock (_shaderCompileLock)
+      {
+          try
+          {
+              byte[] spirv = shaderSource.BinaryCode;
+              string sourceKind = spirv == null ? "GLSL" : "SPIR-V";
 
-                    if (spirv == null)
-                    {
-                        CompileStatus = ProgramLinkStatus.Failure;
+              Logger.Info?.Print(
+                  LogClass.Gpu,
+                  $"ShaderSafe #{shaderDiagnosticId}: begin stage={_stage}, source={sourceKind}.");
 
-                        return;
-                    }
-                }
+              if (spirv == null)
+              {
+                  spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
 
-                fixed (byte* pCode = spirv)
-                {
-                    var shaderModuleCreateInfo = new ShaderModuleCreateInfo
-                    {
-                        SType = StructureType.ShaderModuleCreateInfo,
-                        CodeSize = (uint)spirv.Length,
-                        PCode = (uint*)pCode,
-                    };
+                  if (spirv == null)
+                  {
+                      CompileStatus = ProgramLinkStatus.Failure;
+                      Logger.Error?.Print(
+                          LogClass.Gpu,
+                          $"ShaderSafe #{shaderDiagnosticId}: GLSL to SPIR-V conversion failed.");
 
-                    api.CreateShaderModule(device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
-                }
+                      return;
+                  }
+              }
 
-                CompileStatus = ProgramLinkStatus.Success;
-            });
+              Logger.Info?.Print(
+                  LogClass.Gpu,
+                  $"ShaderSafe #{shaderDiagnosticId}: vkCreateShaderModule begin, bytes={spirv.Length}.");
+
+              fixed (byte* pCode = spirv)
+              {
+                  var shaderModuleCreateInfo = new ShaderModuleCreateInfo
+                  {
+                      SType = StructureType.ShaderModuleCreateInfo,
+                      CodeSize = (uint)spirv.Length,
+                      PCode = (uint*)pCode,
+                  };
+
+                  api.CreateShaderModule(device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
+              }
+
+              CompileStatus = ProgramLinkStatus.Success;
+              Logger.Info?.Print(
+                  LogClass.Gpu,
+                  $"ShaderSafe #{shaderDiagnosticId}: vkCreateShaderModule completed.");
+          }
+          catch (Exception exception)
+          {
+              CompileStatus = ProgramLinkStatus.Failure;
+              Logger.Error?.Print(
+                  LogClass.Gpu,
+                  $"ShaderSafe #{shaderDiagnosticId}: managed shader failure: {exception}");
+          }
+      }
+  });
         }
 
         private unsafe static byte[] GlslToSpirv(string glsl, ShaderStage stage)
