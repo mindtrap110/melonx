@@ -27,20 +27,23 @@ jobs:
           path = Path("src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs")
           text = path.read_text(encoding="utf-8")
 
-          old = """            _compileTask = BackgroundCompilation();
-                      _firstBackgroundUse = !fromCache;
-          """
-          new = """            // MoltenVK/iOS compatibility mode: avoid concurrent background
-                      // VkGraphicsPipeline creation while the first real draw is also creating
-                      // pipelines on the render thread. Some Apple Metal driver failures terminate
-                      // the process below managed exception handling, leaving an abruptly ended log.
-                      _compileTask = Task.CompletedTask;
-                      _firstBackgroundUse = false;
-                      Logger.Info?.Print(LogClass.Gpu, \"Three Houses safe mode: background pipeline precompilation disabled.\");
-          """
+          old = (
+              "            _compileTask = BackgroundCompilation();\n"
+              "            _firstBackgroundUse = !fromCache;"
+          )
+          new = (
+              "            // MoltenVK/iOS compatibility mode: avoid concurrent background\n"
+              "            // VkGraphicsPipeline creation while the first real draw is also creating\n"
+              "            // pipelines on the render thread. Some Apple Metal driver failures terminate\n"
+              "            // the process below managed exception handling, leaving an abruptly ended log.\n"
+              "            _compileTask = Task.CompletedTask;\n"
+              "            _firstBackgroundUse = false;\n"
+              "            Logger.Info?.Print(LogClass.Gpu, \"Three Houses safe mode: background pipeline precompilation disabled.\");"
+          )
 
-          if old not in text:
-              raise SystemExit("Expected ShaderCollection constructor block was not found; refusing to patch.")
+          matches = text.count(old)
+          if matches != 1:
+              raise SystemExit(f"Expected exactly one ShaderCollection constructor block, found {matches}.")
 
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
@@ -68,7 +71,7 @@ jobs:
           git checkout -B "$TARGET_BRANCH"
           git add src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
           git commit -m "Disable background Vulkan pipeline precompile on iOS safe build"
-          git push --force-with-lease origin "$TARGET_BRANCH"
+          git push --force origin "$TARGET_BRANCH"
 
       - name: Write summary
         run: |
