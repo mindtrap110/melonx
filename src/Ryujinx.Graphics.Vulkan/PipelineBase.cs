@@ -47,7 +47,7 @@ namespace Ryujinx.Graphics.Vulkan
 
         private static int _nextPipelineAbId;
         private static int _nextDescriptorAbId;
-        private const int PipelineThrottleMilliseconds = 0;
+        private const int PipelineThrottleMilliseconds = 2;
 
         private static bool ShouldLogPipelineAb(int id)
         {
