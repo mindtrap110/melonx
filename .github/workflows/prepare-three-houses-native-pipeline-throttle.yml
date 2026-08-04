@@ -1,0 +1,78 @@
+name: Prepare Three Houses native pipeline throttle branch
+run-name: Prepare Three Houses native pipeline throttle branch
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - XC-ios-ht
+    paths:
+      - .github/triggers/prepare-three-houses-native-pipeline-throttle.txt
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare native pipeline throttle branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@v4
+        with:
+          ref: XC-ios-ht
+          path: workflow-tools
+          fetch-depth: 1
+
+      - name: Checkout memory-stable throttle source
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-memory-stable-throttle-4ms
+          path: source
+          fetch-depth: 0
+
+      - name: Move throttle to native cache misses
+        run: |
+          python3 workflow-tools/.github/scripts/prepare_three_houses_native_pipeline_throttle.py source
+
+      - name: Verify patch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          grep -Fq 'PipelineThrottleMilliseconds = 0;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'NativePipelineThrottleMilliseconds = 4;' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'NativePipeline G#' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'ThrottleNativePipelineCreation("G")' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'ThrottleNativePipelineCreation("C")' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          git diff -- src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          git diff -- src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+
+      - name: Commit branch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B three-houses-native-pipeline-throttle-4ms
+          git add \
+            src/Ryujinx.Graphics.Vulkan/PipelineBase.cs \
+            src/Ryujinx.Graphics.Vulkan/PipelineState.cs \
+            src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          git commit -m "Throttle only native pipeline cache misses"
+          git push --force origin three-houses-native-pipeline-throttle-4ms
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Native pipeline throttle branch prepared"
+            echo
+            echo "- Branch: three-houses-native-pipeline-throttle-4ms"
+            echo "- Base: three-houses-memory-stable-throttle-4ms"
+            echo "- Per-request delay: removed"
+            echo "- Native cache-miss delay: 4 ms"
+            echo "- MoltenVK concurrent compilation maximization: disabled"
+          } >> "$GITHUB_STEP_SUMMARY"
