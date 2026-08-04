@@ -1,7 +1,9 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Common.Memory;
 using Silk.NET.Vulkan;
 using System;
 using System.Numerics;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Vulkan
 {
@@ -9,6 +11,26 @@ namespace Ryujinx.Graphics.Vulkan
     {
         private const int RequiredSubgroupSize = 32;
         private const int MaxDynamicStatesCount = 9;
+
+        private static int _nativePipelineCreateId;
+        private const int NativePipelineThrottleMilliseconds = 4;
+
+        private static void ThrottleNativePipelineCreation(string pipelineKind)
+        {
+            int id = Interlocked.Increment(ref _nativePipelineCreateId);
+
+            if (id <= 20 || id % 100 == 0)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"NativePipeline {pipelineKind}#{id}: cache miss; delaying {NativePipelineThrottleMilliseconds} ms before native creation.");
+            }
+
+            if (NativePipelineThrottleMilliseconds > 0)
+            {
+                Thread.Sleep(NativePipelineThrottleMilliseconds);
+            }
+        }
 
         public PipelineUid Internal;
 
@@ -338,6 +360,8 @@ namespace Ryujinx.Graphics.Vulkan
                 return pipeline;
             }
 
+            ThrottleNativePipelineCreation("C");
+
             var pipelineCreateInfo = new ComputePipelineCreateInfo
             {
                 SType = StructureType.ComputePipelineCreateInfo,
@@ -390,6 +414,8 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 return pipeline;
             }
+
+            ThrottleNativePipelineCreation("G");
 
             Pipeline pipelineHandle = default;
 
