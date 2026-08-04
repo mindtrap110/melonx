@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
           grep -Fq 'PipelineThrottleMilliseconds = 0;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
           grep -Fq 'NativePipelineThrottleMilliseconds = 4;' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
-          grep -Fq 'NativePipeline G#' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'NativePipeline {pipelineKind}#{id}: cache miss;' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
           grep -Fq 'ThrottleNativePipelineCreation("G")' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
           grep -Fq 'ThrottleNativePipelineCreation("C")' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
           grep -Fq 'MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
