@@ -1,0 +1,97 @@
+name: Prepare Three Houses balanced pacing branches
+run-name: Prepare Three Houses balanced pacing branches
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - XC-ios-ht
+    paths:
+      - .github/triggers/prepare-three-houses-balanced-pacing.txt
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare ${{ matrix.target_branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_branch: three-houses-balanced-pacing-2ms-cb4
+            delay_ms: 2
+            pooling_mode: command-pooling-on
+            commit_message: Add balanced 2 ms startup pacing and four-buffer backpressure
+          - target_branch: three-houses-low-memory-pacing-3ms-cb4
+            delay_ms: 3
+            pooling_mode: command-pooling-off
+            commit_message: Add low-memory 3 ms pacing and disable command pooling
+
+    steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@v4
+        with:
+          ref: XC-ios-ht
+          path: workflow-tools
+          fetch-depth: 1
+
+      - name: Checkout native pipeline throttle source
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-native-pipeline-throttle-4ms
+          path: source
+          fetch-depth: 0
+
+      - name: Apply balanced pacing patch
+        run: |
+          python3 workflow-tools/.github/scripts/prepare_three_houses_balanced_pacing.py \
+            source \
+            "${{ matrix.delay_ms }}" \
+            "${{ matrix.pooling_mode }}"
+
+      - name: Verify patch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          grep -Fq "PipelineThrottleMilliseconds = ${{ matrix.delay_ms }};" src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'NativePipelineThrottleMilliseconds = 4;' src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          if [ "${{ matrix.pooling_mode }}" = "command-pooling-off" ]; then
+            grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          else
+            ! grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          fi
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          git diff -- src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+
+      - name: Commit branch
+        working-directory: source
+        env:
+          TARGET_BRANCH: ${{ matrix.target_branch }}
+          COMMIT_MESSAGE: ${{ matrix.commit_message }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add \
+            src/Ryujinx.Graphics.Vulkan/PipelineBase.cs \
+            src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          git commit -m "$COMMIT_MESSAGE"
+          git push --force origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Three Houses pacing branch prepared"
+            echo
+            echo "- Branch: ${{ matrix.target_branch }}"
+            echo "- Base: three-houses-native-pipeline-throttle-4ms"
+            echo "- Pipeline request delay: ${{ matrix.delay_ms }} ms"
+            echo "- Native pipeline cache-miss delay: 4 ms"
+            echo "- Max active Metal command buffers per queue: 4"
+            echo "- Command pooling: ${{ matrix.pooling_mode }}"
+          } >> "$GITHUB_STEP_SUMMARY"
