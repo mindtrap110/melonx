@@ -37,8 +37,8 @@ struct MeloNXApp: View {
         EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "2"),
 
         // Three Houses can create and submit a large burst of GPU work during
-        // startup. Keep the number of in-flight Metal command buffers aligned
-        // with Ryujinx's 16-command-buffer pool instead of the previous 128.
+        // startup. Keep the number of in-flight Metal command buffers low so
+        // iOS can reclaim completed command resources before the next burst.
         EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4"),
 
         // Mode 2 encodes commands immediately and drains an autorelease pool for
@@ -49,7 +49,13 @@ struct MeloNXApp: View {
         EnvironmentVariable(string: "MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", value: "0"),
         EnvironmentVariable(string: "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", value: "1"),
+
+        // Low-memory fallbacks: release executed command objects rather than
+        // retaining them in a reuse pool, and use the classic descriptor path
+        // instead of Metal argument buffers. The latter is an A/B experiment
+        // targeting descriptor/argument-buffer retention during startup.
         EnvironmentVariable(string: "MVK_CONFIG_USE_COMMAND_POOLING", value: "0"),
+        EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", value: "0"),
         EnvironmentVariable(string: "DOTNET_DefaultStackSize", value: "200000") // probably doesn't work on NativeAOT
     ]
     
