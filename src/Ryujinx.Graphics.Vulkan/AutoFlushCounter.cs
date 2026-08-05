@@ -26,6 +26,13 @@ namespace Ryujinx.Graphics.Vulkan
         private const int MinConsecutiveQueryForFlush = 10;
         private const int InitialQueryCountForFlush = 32;
 
+        // A presentation stall can otherwise leave one command buffer recording
+        // indefinitely. Every descriptor and resource referenced by that command
+        // buffer then remains alive until it is submitted, eventually exhausting
+        // the iOS per-process memory allowance. Ryujinx already supports safe
+        // mid-frame submission and state restoration through FlushCommandsImpl().
+        private const int MaxDrawCountWithoutFlush = 512;
+
         private readonly VulkanRenderer _gd;
 
         private long _lastFlush;
@@ -33,6 +40,7 @@ namespace Ryujinx.Graphics.Vulkan
         private bool _hasPendingQuery;
         private int _consecutiveQueries;
         private int _queryCount;
+        private int _forcedFlushCount;
 
         private readonly int[] _queryCountHistory = new int[3];
         private int _queryCountHistoryIndex;
@@ -96,10 +104,28 @@ namespace Ryujinx.Graphics.Vulkan
 
         public bool ShouldFlushDraw(ulong drawCount)
         {
+            long draws = (long)(drawCount - _lastDrawCount);
+
+            // Do not make draw submission depend exclusively on Present() or
+            // attachment changes. Three Houses can continue building a very long
+            // off-screen frame after its crest animation, which retains descriptor
+            // sets and native resources in one unsubmitted command buffer.
+            if (draws >= MaxDrawCountWithoutFlush)
+            {
+                _forcedFlushCount++;
+
+                if (_forcedFlushCount <= 8 || (_forcedFlushCount & 63) == 0)
+                {
+                    Logger.Info?.PrintMsg(
+                        LogClass.Gpu,
+                        $"Three Houses forced periodic flush #{_forcedFlushCount}: draws={draws}, fastFlush={_fastFlushMode}.");
+                }
+
+                return true;
+            }
+
             if (_fastFlushMode)
             {
-                long draws = (long)(drawCount - _lastDrawCount);
-
                 if (draws < MinDrawCountForFlush)
                 {
                     if (draws == 0)
