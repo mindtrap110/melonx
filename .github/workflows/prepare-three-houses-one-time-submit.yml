@@ -1,0 +1,56 @@
+name: Prepare Three Houses one-time-submit branch
+run-name: Prepare Three Houses one-time-submit branch
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - XC-ios-ht
+    paths:
+      - .github/triggers/prepare-three-houses-one-time-submit.txt
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@v4
+        with:
+          ref: XC-ios-ht
+          path: workflow-tools
+          fetch-depth: 1
+
+      - name: Checkout balanced pacing source
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-balanced-pacing-2ms-cb4
+          path: source
+          fetch-depth: 0
+
+      - name: Mark command buffers one-time-submit
+        run: |
+          python3 workflow-tools/.github/scripts/prepare_three_houses_one_time_submit.py source
+
+      - name: Verify patch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          grep -Fq 'PipelineThrottleMilliseconds = 2;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          grep -Fq 'Flags = CommandBufferUsageFlags.OneTimeSubmitBit' src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+
+      - name: Commit branch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B three-houses-balanced-2ms-cb4-one-time-submit
+          git add src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          git commit -m "Mark reused Vulkan command buffers one-time-submit"
+          git push --force origin three-houses-balanced-2ms-cb4-one-time-submit
