@@ -251,6 +251,13 @@ namespace Ryujinx.Graphics.Vulkan
                         var commandBufferBeginInfo = new CommandBufferBeginInfo
                         {
                             SType = StructureType.CommandBufferBeginInfo,
+                            // MoltenVK prefill modes only remain effective across reused
+                            // primary command buffers when each recording is explicitly
+                            // marked as a one-time submission. Ryujinx resets and records
+                            // these buffers anew for every submission, so this accurately
+                            // describes their lifetime and prevents later recordings from
+                            // falling back to the largest-footprint deferred encoding path.
+                            Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
                         };
 
                         _api.BeginCommandBuffer(entry.CommandBuffer, in commandBufferBeginInfo).ThrowOnError();
