@@ -41,6 +41,7 @@ namespace Ryujinx.Graphics.Vulkan
         private int _consecutiveQueries;
         private int _queryCount;
         private int _forcedFlushCount;
+        private int _presentCount;
 
         private readonly int[] _queryCountHistory = new int[3];
         private int _queryCountHistoryIndex;
@@ -179,6 +180,13 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void Present()
         {
+            _presentCount++;
+
+            if (_presentCount <= 8 || (_presentCount & 255) == 0)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"Three Houses present milestone #{_presentCount}.");
+            }
+
             // Query flush prediction.
 
             _queryCountHistoryIndex = (_queryCountHistoryIndex + 1) % 3;
