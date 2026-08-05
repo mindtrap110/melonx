@@ -1,0 +1,85 @@
+name: Prepare Three Houses two-buffer no-pooling branch
+run-name: Prepare Three Houses two-buffer no-pooling branch
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - XC-ios-ht
+    paths:
+      - .github/triggers/prepare-three-houses-cbpool2-no-mvk-pooling.txt
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare two-buffer no-pooling branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-cbpool4-2ms-one-time-no-mvk-pooling
+          fetch-depth: 0
+
+      - name: Reduce command-buffer windows to two
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cb = Path('src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs')
+          text = cb.read_text(encoding='utf-8')
+          old = 'public const int MaxCommandBuffers = 4;'
+          new = 'public const int MaxCommandBuffers = 2;'
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one Ryujinx command-buffer constant, found {text.count(old)}')
+          cb.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          app = Path('src/MeloNX/MeloNX/App/UI/MeloNXApp.swift')
+          text = app.read_text(encoding='utf-8')
+          old = 'EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4")'
+          new = 'EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "2")'
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one MoltenVK command-buffer setting, found {text.count(old)}')
+          app.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Verify patch
+        run: |
+          set -euo pipefail
+          grep -Fq 'public const int MaxCommandBuffers = 2;' src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "2"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          grep -Fq 'CommandBufferUsageFlags.OneTimeSubmitBit' src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          grep -Fq 'PipelineThrottleMilliseconds = 2;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          git diff -- src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+
+      - name: Commit branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B three-houses-cbpool2-2ms-one-time-no-mvk-pooling
+          git add \
+            src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs \
+            src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          git commit -m "Reduce Three Houses command-buffer windows to two"
+          git push --force origin three-houses-cbpool2-2ms-one-time-no-mvk-pooling
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Two-buffer no-pooling branch prepared"
+            echo
+            echo "- Branch: three-houses-cbpool2-2ms-one-time-no-mvk-pooling"
+            echo "- Base: three-houses-cbpool4-2ms-one-time-no-mvk-pooling"
+            echo "- Ryujinx command buffers: 2"
+            echo "- Active Metal command buffers: 2"
+            echo "- MoltenVK command pooling: disabled"
+            echo "- Pipeline request throttle: 2 ms"
+          } >> "$GITHUB_STEP_SUMMARY"
