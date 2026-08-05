@@ -1,0 +1,95 @@
+name: Prepare Three Houses four-command-buffer branches
+run-name: Prepare Three Houses four-command-buffer branches
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - XC-ios-ht
+    paths:
+      - .github/triggers/prepare-three-houses-cbpool4.txt
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare ${{ matrix.target_branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_branch: three-houses-cbpool4-2ms-one-time
+            pooling_mode: mvk-pooling-on
+            commit_message: Limit Ryujinx command buffers to four
+          - target_branch: three-houses-cbpool4-2ms-one-time-no-mvk-pooling
+            pooling_mode: mvk-pooling-off
+            commit_message: Limit command buffers and disable MoltenVK command pooling
+
+    steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@v4
+        with:
+          ref: XC-ios-ht
+          path: workflow-tools
+          fetch-depth: 1
+
+      - name: Checkout OneTimeSubmit source
+        uses: actions/checkout@v4
+        with:
+          ref: three-houses-balanced-2ms-cb4-one-time-submit
+          path: source
+          fetch-depth: 0
+
+      - name: Apply four-command-buffer patch
+        run: |
+          python3 workflow-tools/.github/scripts/prepare_three_houses_cbpool4.py \
+            source \
+            "${{ matrix.pooling_mode }}"
+
+      - name: Verify patch
+        working-directory: source
+        run: |
+          set -euo pipefail
+          grep -Fq 'public const int MaxCommandBuffers = 4;' src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          grep -Fq 'Flags = CommandBufferUsageFlags.OneTimeSubmitBit,' src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          grep -Fq 'PipelineThrottleMilliseconds = 2;' src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          if [ "${{ matrix.pooling_mode }}" = "mvk-pooling-off" ]; then
+            grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          else
+            ! grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          fi
+          git diff --check
+          git diff -- src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+          git diff -- src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+
+      - name: Commit branch
+        working-directory: source
+        env:
+          TARGET_BRANCH: ${{ matrix.target_branch }}
+          COMMIT_MESSAGE: ${{ matrix.commit_message }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH"
+          git add \
+            src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs \
+            src/MeloNX/MeloNX/App/UI/MeloNXApp.swift
+          git commit -m "$COMMIT_MESSAGE"
+          git push --force origin "$TARGET_BRANCH"
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Four-command-buffer branch prepared"
+            echo
+            echo "- Branch: ${{ matrix.target_branch }}"
+            echo "- Base: three-houses-balanced-2ms-cb4-one-time-submit"
+            echo "- Ryujinx primary command buffers: 4"
+            echo "- OneTimeSubmitBit: enabled"
+            echo "- Pipeline request delay: 2 ms"
+            echo "- MoltenVK command pooling: ${{ matrix.pooling_mode }}"
+          } >> "$GITHUB_STEP_SUMMARY"
