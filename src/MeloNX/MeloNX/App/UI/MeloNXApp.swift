@@ -34,7 +34,7 @@ struct MeloNXApp: View {
         EnvironmentVariable(string: "MVK_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_DEBUG", value: "0"),
-        EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "2"),
+        EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "3"),
 
         // This limit is per Vulkan queue, not per Ryujinx command pool. Ryujinx
         // can use its main and light command-buffer pools on the same queue, so
@@ -46,6 +46,13 @@ struct MeloNXApp: View {
         // Mode 2 encodes commands immediately and drains an autorelease pool for
         // each command. MoltenVK documents this as its smallest-footprint mode.
         EnvironmentVariable(string: "MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", value: "2"),
+
+        // Trace each Vulkan API entry and exit with thread and duration data.
+        // This branch is diagnostic only and should be run briefly.
+        EnvironmentVariable(string: "MVK_CONFIG_TRACE_VULKAN_CALLS", value: "6"),
+        EnvironmentVariable(string: "MVK_CONFIG_PERFORMANCE_TRACKING", value: "1"),
+        EnvironmentVariable(string: "MVK_CONFIG_PERFORMANCE_LOGGING_FRAME_COUNT", value: "60"),
+        EnvironmentVariable(string: "MVK_CONFIG_ACTIVITY_PERFORMANCE_LOGGING_STYLE", value: "0"),
 
         // Compress retained MSL source in the Vulkan pipeline cache using LZFSE.
         EnvironmentVariable(string: "MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM", value: "1"),
