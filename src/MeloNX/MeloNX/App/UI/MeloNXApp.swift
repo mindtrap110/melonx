@@ -49,6 +49,7 @@ struct MeloNXApp: View {
         EnvironmentVariable(string: "MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", value: "0"),
         EnvironmentVariable(string: "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", value: "1"),
+        EnvironmentVariable(string: "MVK_CONFIG_USE_COMMAND_POOLING", value: "0"),
         EnvironmentVariable(string: "DOTNET_DefaultStackSize", value: "200000") // probably doesn't work on NativeAOT
     ]
     
