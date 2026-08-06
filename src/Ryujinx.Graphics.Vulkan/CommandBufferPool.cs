@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
@@ -21,6 +22,9 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly bool _concurrentFenceWaitUnsupported;
         private readonly CommandPool _pool;
         private readonly Thread _owner;
+
+        private static long _globalSubmitCount;
+        private static long _globalFenceWaitCount;
 
         public bool OwnedByCurrentThread => _owner == Thread.CurrentThread;
 
@@ -318,10 +322,25 @@ namespace Ryujinx.Graphics.Vulkan
 
                         lock (_queueLock)
                         {
-                            Fence? fence = entry.Fence.Get();
-                            if (fence != null)
+                            long submitId = Interlocked.Increment(ref _globalSubmitCount);
+                            bool traceSubmit = OperatingSystem.IsIOS() && (submitId <= 16 || (submitId % 100) == 0);
+
+                            if (traceSubmit)
                             {
-                                _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+                                Logger.Info?.Print(
+                                    LogClass.Gpu,
+                                    $"iOS QueueSubmit #{submitId}: begin cb={cbIndex}, localSubmission={entry.SubmissionCount}, inUse={_inUseCount}, queued={_queuedCount}.");
+                            }
+
+                            // Get() increments the FenceHolder reference count. The old
+                            // code never paired that increment with Put(), leaking one
+                            // native Vulkan fence per submission. QueueSubmit only needs
+                            // the existing fence handle owned by this pool entry.
+                            _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+
+                            if (traceSubmit)
+                            {
+                                Logger.Info?.Print(LogClass.Gpu, $"iOS QueueSubmit #{submitId}: returned.");
                             }
                         }
                     }
@@ -339,7 +358,25 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (entry.InConsumption)
             {
+                long waitId = Interlocked.Increment(ref _globalFenceWaitCount);
+                bool traceWait = OperatingSystem.IsIOS() && (waitId <= 16 || (waitId % 100) == 0);
+                long waitStart = Stopwatch.GetTimestamp();
+
+                if (traceWait)
+                {
+                    Logger.Warning?.Print(
+                        LogClass.Gpu,
+                        $"iOS Vulkan fence wait #{waitId}: begin cb={cbIndex}, localSubmission={entry.SubmissionCount}, inUse={_inUseCount}, queued={_queuedCount}.");
+                }
+
                 entry.Fence.Wait();
+
+                if (traceWait)
+                {
+                    double elapsedMs = (Stopwatch.GetTimestamp() - waitStart) * 1000.0 / Stopwatch.Frequency;
+                    Logger.Warning?.Print(LogClass.Gpu, $"iOS Vulkan fence wait #{waitId}: completed in {elapsedMs:F3} ms.");
+                }
+
                 entry.InConsumption = false;
             }
 
