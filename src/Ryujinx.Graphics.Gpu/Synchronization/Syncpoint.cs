@@ -36,27 +36,34 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
         /// <returns>The created SyncpointWaiterHandle object or null if already past threshold</returns>
         public SyncpointWaiterHandle RegisterCallback(uint threshold, Action<SyncpointWaiterHandle> callback)
         {
+            SyncpointWaiterHandle waiterInformation = null;
+            bool isPastThreshold;
+
             lock (_waiters)
             {
-                if (Value >= threshold)
-                {
-                    callback(null);
+                isPastThreshold = Value >= threshold;
 
-                    return null;
-                }
-                else
+                if (!isPastThreshold)
                 {
-                    SyncpointWaiterHandle waiterInformation = new()
+                    waiterInformation = new SyncpointWaiterHandle
                     {
                         Threshold = threshold,
                         Callback = callback,
                     };
 
                     _waiters.Add(waiterInformation);
-
-                    return waiterInformation;
                 }
             }
+
+            // Never invoke arbitrary callbacks while holding _waiters. Increment()
+            // already follows this rule because callbacks may acquire other locks or
+            // block. The immediate-completion path must obey the same lock ordering.
+            if (isPastThreshold)
+            {
+                callback(null);
+            }
+
+            return waiterInformation;
         }
 
         public void UnregisterCallback(SyncpointWaiterHandle waiterInformation)
