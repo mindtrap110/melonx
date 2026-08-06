@@ -1,0 +1,235 @@
+name: iOS known-good increased-memory IPA
+run-name: Known-good increased-memory IPA (${{ github.ref_name }})
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-known-good-increased-memory-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODE_PROJECT: src/MeloNX/MeloNX.xcodeproj
+  XCODE_SCHEME: MeloNX
+  XCODE_CONFIGURATION: Release
+  DERIVED_DATA_PATH: build/DerivedData
+  IPA_OUTPUT_DIR: build/ipa
+  RESULT_BUNDLE_PATH: build/MeloNX.xcresult
+
+jobs:
+  build:
+    name: Build and correctly sign increased-memory IPA
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          selected_xcode="$(find /Applications -maxdepth 1 -name 'Xcode*.app' -print | sort -V | tail -n 1)"
+          test -n "$selected_xcode"
+          sudo xcode-select -s "$selected_xcode/Contents/Developer"
+          xcodebuild -version
+
+      - name: Verify known-good source configuration
+        run: |
+          set -euo pipefail
+          app_source="$PWD/src/MeloNX/MeloNX/App/UI/MeloNXApp.swift"
+          pool_source="$PWD/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs"
+          grep -Fq 'public const int MaxCommandBuffers = 2;' "$pool_source"
+          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "2"' "$app_source"
+          grep -Fq 'MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", value: "2"' "$app_source"
+          grep -Fq 'MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", value: "1"' "$app_source"
+          grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' "$app_source"
+          grep -Fq 'CommandBufferUsageFlags.OneTimeSubmitBit' "$pool_source"
+          echo "Known-good GPU configuration verified."
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('Directory.Packages.props', 'nuget.config', '**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Install .NET iOS workload
+        run: dotnet workload install ios
+
+      - name: Resolve Swift packages
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -resolvePackageDependencies
+
+      - name: Build unsigned app
+        run: |
+          set -euo pipefail
+          libdeps="$PWD/build/libdeps"
+          mkdir -p build
+          ln -sfn "$PWD/src/MeloNX/MeloNX/Dependencies/Dynamic Libraries" "$libdeps"
+          rm -rf "$RESULT_BUNDLE_PATH"
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration "$XCODE_CONFIGURATION" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -resultBundlePath "$RESULT_BUNDLE_PATH" \
+            clean build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ONLY_ACTIVE_ARCH=NO \
+            "LIBRARY_SEARCH_PATHS=\$(inherited) $libdeps" \
+            "OTHER_LDFLAGS=\$(inherited) $libdeps/Ryujinx.Headless.SDL2.dylib"
+
+      - name: Prepare app and entitlement
+        run: |
+          set -euo pipefail
+          app_path="$(find "$DERIVED_DATA_PATH/Build/Products/${XCODE_CONFIGURATION}-iphoneos" -maxdepth 1 -name 'MeloNX.app' -type d -print -quit)"
+          test -n "$app_path"
+          test -d "$app_path"
+
+          ryujinx_dylib="$PWD/src/MeloNX/MeloNX/Dependencies/Dynamic Libraries/Ryujinx.Headless.SDL2.dylib"
+          if [ ! -f "$ryujinx_dylib" ]; then
+            ryujinx_dylib="$(find "$PWD/src/Ryujinx.Headless.SDL2" "$PWD/src/MeloNX/MeloNX/Dependencies" -name 'Ryujinx.Headless.SDL2.dylib' -type f -print -quit)"
+          fi
+          test -n "$ryujinx_dylib"
+          test -f "$ryujinx_dylib"
+
+          mkdir -p "$app_path/Frameworks"
+          ditto "$ryujinx_dylib" "$app_path/Frameworks/Ryujinx.Headless.SDL2.dylib"
+          chmod 755 "$app_path/Frameworks/Ryujinx.Headless.SDL2.dylib"
+
+          rm -rf "$IPA_OUTPUT_DIR"
+          mkdir -p "$IPA_OUTPUT_DIR"
+
+          cat > "$IPA_OUTPUT_DIR/MeloNX-sideload.entitlements" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.developer.kernel.increased-memory-limit</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$IPA_OUTPUT_DIR/MeloNX-sideload.entitlements"
+
+          find "$app_path" -type d -name '_CodeSignature' -prune -exec rm -rf {} +
+          find "$app_path" -type f -name 'embedded.mobileprovision' -delete
+
+          echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
+
+      - name: Sign nested Mach-O files first
+        run: |
+          set -euo pipefail
+          python3 - "$APP_PATH" <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          app = Path(sys.argv[1]).resolve()
+          files = []
+          for path in app.rglob("*"):
+              if not path.is_file() or path.is_symlink():
+                  continue
+              result = subprocess.run(
+                  ["file", "-b", str(path)],
+                  check=True,
+                  text=True,
+                  capture_output=True,
+              )
+              if "Mach-O" in result.stdout:
+                  files.append(path)
+
+          for path in sorted(files, key=lambda item: len(item.parts), reverse=True):
+              print(f"Signing Mach-O: {path}")
+              subprocess.run(
+                  ["codesign", "--force", "--sign", "-", "--timestamp=none", str(path)],
+                  check=True,
+              )
+
+          bundle_suffixes = {".framework", ".appex", ".xpc"}
+          bundles = [
+              path for path in app.rglob("*")
+              if path.is_dir() and path.suffix in bundle_suffixes
+          ]
+          for path in sorted(bundles, key=lambda item: len(item.parts), reverse=True):
+              print(f"Signing nested bundle: {path}")
+              subprocess.run(
+                  ["codesign", "--force", "--sign", "-", "--timestamp=none", str(path)],
+                  check=True,
+              )
+          PY
+
+      - name: Sign app bundle last with increased memory entitlement
+        run: |
+          set -euo pipefail
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            --generate-entitlement-der \
+            --entitlements "$IPA_OUTPUT_DIR/MeloNX-sideload.entitlements" \
+            "$APP_PATH"
+
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH" \
+            > "$IPA_OUTPUT_DIR/MeloNX-embedded-entitlements.plist" \
+            2> "$IPA_OUTPUT_DIR/codesign-display.txt"
+          plutil -lint "$IPA_OUTPUT_DIR/MeloNX-embedded-entitlements.plist"
+          value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.kernel.increased-memory-limit' "$IPA_OUTPUT_DIR/MeloNX-embedded-entitlements.plist")"
+          test "$value" = "true"
+          echo "Embedded Increased Memory Limit: $value"
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          mkdir -p "$IPA_OUTPUT_DIR/Payload"
+          ditto "$APP_PATH" "$IPA_OUTPUT_DIR/Payload/MeloNX.app"
+          (cd "$IPA_OUTPUT_DIR" && zip -qry MeloNX-known-good-increased-memory.ipa Payload)
+          shasum -a 256 "$IPA_OUTPUT_DIR/MeloNX-known-good-increased-memory.ipa" | tee "$IPA_OUTPUT_DIR/IPA-SHA256.txt"
+          du -sh "$IPA_OUTPUT_DIR/MeloNX-known-good-increased-memory.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeloNX-known-good-increased-memory
+          path: |
+            ${{ env.IPA_OUTPUT_DIR }}/MeloNX-known-good-increased-memory.ipa
+            ${{ env.IPA_OUTPUT_DIR }}/MeloNX-sideload.entitlements
+            ${{ env.IPA_OUTPUT_DIR }}/MeloNX-embedded-entitlements.plist
+            ${{ env.IPA_OUTPUT_DIR }}/codesign-display.txt
+            ${{ env.IPA_OUTPUT_DIR }}/IPA-SHA256.txt
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Known-good increased-memory IPA"
+            echo
+            echo "- GPU source: known-good two-buffer configuration"
+            echo "- Signing order: nested Mach-O and bundles first, app bundle last"
+            echo "- App entitlement: com.apple.developer.kernel.increased-memory-limit=true"
+            echo "- Output: MeloNX-known-good-increased-memory.ipa"
+          } >> "$GITHUB_STEP_SUMMARY"
