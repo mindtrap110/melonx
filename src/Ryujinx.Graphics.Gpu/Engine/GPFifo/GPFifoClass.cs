@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Device;
 using Ryujinx.Graphics.Gpu.Engine.MME;
 using Ryujinx.Graphics.Gpu.Synchronization;
@@ -17,6 +18,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         private readonly DeviceState<GPFifoClassState> _state;
 
         private bool _createSyncPending;
+        private static int _iosSyncpointIncrementTraceCount;
 
         private const int MacrosCount = 0x80;
 
@@ -157,11 +159,43 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             }
             else if (operation == SyncpointbOperation.Incr)
             {
+                int traceId = 0;
+                bool trace = false;
+
+                if (OperatingSystem.IsIOS())
+                {
+                    traceId = Interlocked.Increment(ref _iosSyncpointIncrementTraceCount);
+                    trace = traceId <= 16 || (traceId % 100) == 0;
+                }
+
+                if (trace)
+                {
+                    Logger.Warning?.Print(
+                        LogClass.Gpu,
+                        $"iOS Syncpointb Incr #{traceId}: enter id={syncpointId}, current={_context.Synchronization.GetSyncpointValue(syncpointId)}.");
+                }
+
                 // "Unbind" render targets since a syncpoint increment might indicate future CPU access for the textures.
                 _parent.TextureManager.RefreshModifiedTextures();
 
+                if (trace)
+                {
+                    Logger.Warning?.Print(LogClass.Gpu, $"iOS Syncpointb Incr #{traceId}: RefreshModifiedTextures returned.");
+                }
+
                 _context.CreateHostSyncIfNeeded(HostSyncFlags.StrictSyncpoint);
-                _context.Synchronization.IncrementSyncpoint(syncpointId);
+
+                if (trace)
+                {
+                    Logger.Warning?.Print(LogClass.Gpu, $"iOS Syncpointb Incr #{traceId}: CreateHostSyncIfNeeded returned.");
+                }
+
+                uint value = _context.Synchronization.IncrementSyncpoint(syncpointId);
+
+                if (trace)
+                {
+                    Logger.Warning?.Print(LogClass.Gpu, $"iOS Syncpointb Incr #{traceId}: increment completed, value={value}.");
+                }
             }
 
             _context.AdvanceSequence();
@@ -200,9 +234,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         }
 
         /// <summary>
-        /// Binds a macro index to a position for the MME
+        /// Binds a macro index to a position in the macro memory.
         /// </summary>
-        /// <param name="argument">Method call argument</param>
         public void LoadMmeStartAddressRam(int argument)
         {
             _macros[_state.State.LoadMmeStartAddressRamPointer++] = new Macro(argument);
@@ -211,7 +244,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <summary>
         /// Changes the shadow RAM control.
         /// </summary>
-        /// <param name="argument">Method call argument</param>
         public void SetMmeShadowRamControl(int argument)
         {
             _parent.SetShadowRamControl(argument);
@@ -220,9 +252,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <summary>
         /// Pushes an argument to a macro.
         /// </summary>
-        /// <param name="index">Index of the macro</param>
-        /// <param name="gpuVa">GPU virtual address where the command word is located</param>
-        /// <param name="argument">Argument to be pushed to the macro</param>
         public void MmePushArgument(int index, ulong gpuVa, int argument)
         {
             _macros[index].PushArgument(gpuVa, argument);
@@ -231,8 +260,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <summary>
         /// Prepares a macro for execution.
         /// </summary>
-        /// <param name="index">Index of the macro</param>
-        /// <param name="argument">Initial argument passed to the macro</param>
         public void MmeStart(int index, int argument)
         {
             _macros[index].StartExecution(_context, _parent, _macroCode, argument);
@@ -241,8 +268,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <summary>
         /// Executes a macro.
         /// </summary>
-        /// <param name="index">Index of the macro</param>
-        /// <param name="state">Current GPU state</param>
         public void CallMme(int index, IDeviceState state)
         {
             _macros[index].Execute(_macroCode, state);
