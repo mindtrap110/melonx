@@ -36,10 +36,10 @@ struct MeloNXApp: View {
         EnvironmentVariable(string: "MVK_CONFIG_DEBUG", value: "0"),
         EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "2"),
 
-        // Three Houses can create and submit a large burst of GPU work during
-        // startup. Keep the number of in-flight Metal command buffers aligned
-        // with Ryujinx's 16-command-buffer pool instead of the previous 128.
-        EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4"),
+        // This limit applies to the whole Vulkan queue, not one Ryujinx
+        // command pool. Main, light, transfer, and presentation work can share
+        // that queue, so four active Metal command buffers can still starve it.
+        EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "16"),
 
         // Mode 2 encodes commands immediately and drains an autorelease pool for
         // each command. MoltenVK documents this as its smallest-footprint mode.
