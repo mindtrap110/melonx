@@ -33,7 +33,7 @@ env:
 
 jobs:
   build:
-    name: Build unsigned IPA
+    name: Build unsigned IPA with memory entitlement
     runs-on: macos-latest
     timeout-minutes: 90
 
@@ -58,6 +58,14 @@ jobs:
           sudo xcode-select -s "$selected_xcode/Contents/Developer"
           echo "Selected Xcode: $selected_xcode"
           xcodebuild -version
+
+      - name: Verify source memory entitlement
+        run: |
+          set -euo pipefail
+          source_entitlements="$PWD/src/MeloNX/MeloNX/MeloNX.entitlements"
+          value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.kernel.increased-memory-limit' "$source_entitlements")"
+          test "$value" = "true"
+          echo "Source Increased Memory Limit entitlement: $value"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -130,7 +138,7 @@ jobs:
             build/diagnostics
           if-no-files-found: warn
 
-      - name: Package unsigned IPA
+      - name: Package IPA with embedded memory entitlement
         run: |
           set -euo pipefail
           app_path="$(find "$DERIVED_DATA_PATH/Build/Products/${XCODE_CONFIGURATION}-iphoneos" -maxdepth 1 -name 'MeloNX.app' -type d -print -quit)"
@@ -155,20 +163,57 @@ jobs:
 
           rm -rf "$IPA_OUTPUT_DIR"
           mkdir -p "$IPA_OUTPUT_DIR/Payload"
+
+          signing_entitlements="$IPA_OUTPUT_DIR/MeloNX-signing-entitlements.plist"
+          cat > "$signing_entitlements" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.developer.kernel.increased-memory-limit</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$signing_entitlements"
+
+          # Embed the requested entitlement in the package before AltStore
+          # performs its final Apple-ID re-sign.
+          codesign --force --deep --sign - --timestamp=none "$app_path"
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            --generate-entitlement-der \
+            --entitlements "$signing_entitlements" \
+            "$app_path"
+          codesign --verify --deep --strict "$app_path"
+
+          embedded_entitlements="$IPA_OUTPUT_DIR/MeloNX-embedded-entitlements.plist"
+          codesign -d --entitlements :- "$app_path" > "$embedded_entitlements" 2>/dev/null
+          plutil -lint "$embedded_entitlements"
+          embedded_value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.kernel.increased-memory-limit' "$embedded_entitlements")"
+          test "$embedded_value" = "true"
+          echo "Embedded Increased Memory Limit entitlement: $embedded_value"
+
           ditto "$app_path" "$IPA_OUTPUT_DIR/Payload/MeloNX.app"
           test -f "$IPA_OUTPUT_DIR/Payload/MeloNX.app/Frameworks/Ryujinx.Headless.SDL2.dylib"
-          ditto "$PWD/src/MeloNX/MeloNX/MeloNX.entitlements" "$IPA_OUTPUT_DIR/MeloNX-signing-entitlements.plist"
-          /usr/libexec/PlistBuddy -c "Print :com.apple.developer.wifi-aware" "$IPA_OUTPUT_DIR/MeloNX-signing-entitlements.plist"
+          codesign -d --entitlements :- "$IPA_OUTPUT_DIR/Payload/MeloNX.app" > /tmp/payload-entitlements.plist 2>/dev/null
+          payload_value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.kernel.increased-memory-limit' /tmp/payload-entitlements.plist)"
+          test "$payload_value" = "true"
+
           (cd "$IPA_OUTPUT_DIR" && zip -qry MeloNX-unsigned.ipa Payload)
+          shasum -a 256 "$IPA_OUTPUT_DIR/MeloNX-unsigned.ipa"
           du -sh "$IPA_OUTPUT_DIR/MeloNX-unsigned.ipa"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: MeloNX-unsigned-ipa
+          name: MeloNX-unsigned-ipa-memory-entitlement
           path: |
             ${{ env.IPA_OUTPUT_DIR }}/MeloNX-unsigned.ipa
             ${{ env.IPA_OUTPUT_DIR }}/MeloNX-signing-entitlements.plist
+            ${{ env.IPA_OUTPUT_DIR }}/MeloNX-embedded-entitlements.plist
           if-no-files-found: error
 
       - name: Report duration
@@ -177,8 +222,9 @@ jobs:
           finished_at="$(date +%s)"
           elapsed="$((finished_at - ${{ steps.timer.outputs.started_at }}))"
           {
-            echo "## iOS unsigned IPA build"
+            echo "## iOS unsigned IPA with memory entitlement"
             echo
+            echo "- Memory entitlement embedded: verified during packaging"
             echo "- Elapsed seconds: $elapsed"
             echo "- Elapsed minutes: $((elapsed / 60))m $((elapsed % 60))s"
             echo "- Runner: $RUNNER_OS / $RUNNER_ARCH"
