@@ -1,8 +1,10 @@
 using Ryujinx.Common.Logging;
 using Silk.NET.Vulkan;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Vulkan
 {
@@ -28,6 +30,7 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly List<SyncHandle> _handles;
         private ulong _flushId;
         private long _waitTicks;
+        private static int _iosDeferredStrictSyncLogCount;
 
         public SyncManager(VulkanRenderer gd, Device device)
         {
@@ -45,7 +48,15 @@ namespace Ryujinx.Graphics.Vulkan
         {
             ulong flushId = _flushId;
             MultiFenceHolder waitable = new();
-            if (strict || _gd.InterruptAction == null)
+
+            // On iOS/MoltenVK, forcing a strict sync to immediately flush and then
+            // ReturnAndRent a command buffer can block forever when both fixed pool
+            // entries are still in flight. Keep the sync attached to the currently
+            // recording command buffer instead. If the sync is actually waited on,
+            // Wait() already interrupts the GPU thread and flushes that buffer.
+            bool deferStrictFlush = strict && OperatingSystem.IsIOS() && _gd.InterruptAction != null;
+
+            if ((strict && !deferStrictFlush) || _gd.InterruptAction == null)
             {
                 _gd.FlushAllCommands();
                 _gd.CommandBufferPool.AddWaitable(waitable);
@@ -56,6 +67,18 @@ namespace Ryujinx.Graphics.Vulkan
                 // If this sync is waited on before the command buffer is submitted, interrupt the gpu thread and flush it manually.
 
                 _gd.CommandBufferPool.AddInUseWaitable(waitable);
+
+                if (deferStrictFlush)
+                {
+                    int logCount = Interlocked.Increment(ref _iosDeferredStrictSyncLogCount);
+
+                    if (logCount <= 16 || (logCount % 100) == 0)
+                    {
+                        Logger.Warning?.Print(
+                            LogClass.Gpu,
+                            $"iOS strict sync #{logCount}: deferred immediate flush (sync={id}, flush={flushId}); attached to in-use command buffer.");
+                    }
+                }
             }
 
             SyncHandle handle = new()
