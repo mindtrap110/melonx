@@ -33,7 +33,7 @@ env:
 
 jobs:
   build:
-    name: Build cbpool4 IPA with memory entitlement
+    name: Build cbpool4 active16 IPA with memory entitlement
     runs-on: macos-latest
     timeout-minutes: 90
 
@@ -59,7 +59,7 @@ jobs:
           echo "Selected Xcode: $selected_xcode"
           xcodebuild -version
 
-      - name: Verify cbpool4 and memory entitlement
+      - name: Verify cbpool4 active16 and memory entitlement
         run: |
           set -euo pipefail
           app_source="$PWD/src/MeloNX/MeloNX/App/UI/MeloNXApp.swift"
@@ -67,7 +67,8 @@ jobs:
           source_entitlements="$PWD/src/MeloNX/MeloNX/MeloNX.entitlements"
 
           grep -Fq 'public const int MaxCommandBuffers = 4;' "$pool_source"
-          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "4"' "$app_source"
+          grep -Fq 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "16"' "$app_source"
+          grep -Fq 'MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", value: "2"' "$app_source"
           grep -Fq 'MVK_CONFIG_USE_COMMAND_POOLING", value: "0"' "$app_source"
           grep -Fq 'MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", value: "1"' "$app_source"
           grep -Fq 'CommandBufferUsageFlags.OneTimeSubmitBit' "$pool_source"
@@ -75,8 +76,8 @@ jobs:
           value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.kernel.increased-memory-limit' "$source_entitlements")"
           test "$value" = "true"
 
-          echo "Ryujinx command buffers: 4"
-          echo "MoltenVK active Metal command buffers: 4"
+          echo "Ryujinx command buffers per main pool: 4"
+          echo "MoltenVK active Metal command buffers per queue: 16"
           echo "Source Increased Memory Limit entitlement: $value"
 
       - name: Setup .NET
@@ -144,7 +145,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: MeloNX-cbpool4-xcode-diagnostics
+          name: MeloNX-cbpool4-active16-xcode-diagnostics
           path: |
             ${{ env.RESULT_BUNDLE_PATH }}
             build/diagnostics
@@ -229,7 +230,7 @@ jobs:
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: MeloNX-unsigned-ipa-cbpool4-memory-main-executable
+          name: MeloNX-unsigned-ipa-cbpool4-active16-memory-main-executable
           path: |
             ${{ env.IPA_OUTPUT_DIR }}/MeloNX-unsigned.ipa
             ${{ env.IPA_OUTPUT_DIR }}/MeloNX-signing-entitlements.plist
@@ -242,10 +243,10 @@ jobs:
           finished_at="$(date +%s)"
           elapsed="$((finished_at - ${{ steps.timer.outputs.started_at }}))"
           {
-            echo "## iOS cbpool4 IPA with memory entitlement"
+            echo "## iOS cbpool4 active16 IPA with memory entitlement"
             echo
-            echo "- Ryujinx command buffers: 4"
-            echo "- MoltenVK active command buffers: 4"
+            echo "- Ryujinx command buffers per main pool: 4"
+            echo "- MoltenVK active Metal command buffers per queue: 16"
             echo "- Main executable entitlement: verified"
             echo "- Nested Ryujinx dylib: unchanged"
             echo "- Elapsed seconds: $elapsed"
