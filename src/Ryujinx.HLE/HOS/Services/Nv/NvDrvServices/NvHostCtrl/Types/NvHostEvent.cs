@@ -126,6 +126,15 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
             }
         }
 
+        private bool ArmGpuWaiter(GpuContext gpuContext, NvFence fence)
+        {
+            Fence = fence;
+            State = NvHostEventState.Waiting;
+            _waiterInformation = gpuContext.Synchronization.RegisterCallbackOnSyncpoint(Fence.Id, Fence.Value, GpuSignaled);
+
+            return true;
+        }
+
         public bool Wait(GpuContext gpuContext, NvFence fence)
         {
             lock (Lock)
@@ -134,27 +143,55 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
                 //       If we do this, we may get an abort or undefined behaviour when the GPU processing thread is blocked for a long period (for example, during shader compilation).
                 //       The reason for this is that the NVN code will try to wait until giving up.
                 //       This is done by trying to wait and signal multiple times until aborting after you are past the timeout.
-                //       As such, if it fails too many time, we enforce a wait on the CPU side indefinitely.
-                //       This allows to keep GPU and CPU in sync when we are slow.
+                //       As such, if it fails too many time, the desktop path enforces a CPU-side wait.
                 if (_failingCount == FailingCountMax)
                 {
-                    Logger.Warning?.Print(LogClass.ServiceNv, "GPU processing thread is too slow, waiting on CPU...");
+                    Fence = fence;
 
-                    Fence.Wait(gpuContext, Timeout.InfiniteTimeSpan);
+                    uint currentValue = gpuContext.Synchronization.GetSyncpointValue(Fence.Id);
+
+                    // On this iOS port, SynchronizationManager converts an infinite
+                    // wait into a one-second timeout. The old code ignored that timeout
+                    // result and returned success to the guest even when the fence had
+                    // not completed. It also held this event lock during the blocking
+                    // wait, which can prevent GPU completion callbacks from advancing.
+                    // Keep the wait asynchronous on iOS instead.
+                    if (OperatingSystem.IsIOS())
+                    {
+                        Logger.Warning?.Print(
+                            LogClass.ServiceNv,
+                            $"iOS syncpoint recovery: re-arming GPU waiter instead of CPU fallback (event={_eventId}, id={Fence.Id}, target={Fence.Value}, current={currentValue}, failures={_failingCount}).");
+
+                        ResetFailingState();
+
+                        return ArmGpuWaiter(gpuContext, fence);
+                    }
+
+                    Logger.Warning?.Print(
+                        LogClass.ServiceNv,
+                        $"GPU processing thread is too slow, waiting on CPU (event={_eventId}, id={Fence.Id}, target={Fence.Value}, current={currentValue})...");
+
+                    bool timedOut = Fence.Wait(gpuContext, Timeout.InfiniteTimeSpan);
+                    uint valueAfterWait = gpuContext.Synchronization.GetSyncpointValue(Fence.Id);
+
+                    Logger.Warning?.Print(
+                        LogClass.ServiceNv,
+                        $"CPU syncpoint wait completed (event={_eventId}, id={Fence.Id}, target={Fence.Value}, current={valueAfterWait}, timedOut={timedOut}).");
 
                     ResetFailingState();
 
+                    // Do not report a timed-out wait as success. Return to the normal
+                    // asynchronous path and let the guest retry until the fence really
+                    // reaches its target.
+                    if (timedOut)
+                    {
+                        return ArmGpuWaiter(gpuContext, fence);
+                    }
+
                     return false;
                 }
-                else
-                {
-                    Fence = fence;
-                    State = NvHostEventState.Waiting;
 
-                    _waiterInformation = gpuContext.Synchronization.RegisterCallbackOnSyncpoint(Fence.Id, Fence.Value, GpuSignaled);
-
-                    return true;
-                }
+                return ArmGpuWaiter(gpuContext, fence);
             }
         }
 
