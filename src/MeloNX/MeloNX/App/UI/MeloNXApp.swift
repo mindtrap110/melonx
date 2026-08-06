@@ -34,16 +34,23 @@ struct MeloNXApp: View {
         EnvironmentVariable(string: "MVK_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_DEBUG", value: "0"),
-        EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "2"),
+        EnvironmentVariable(string: "MVK_CONFIG_LOG_LEVEL", value: "3"),
 
-        // Three Houses can create and submit a large burst of GPU work during
-        // startup. Keep the number of in-flight Metal command buffers aligned
-        // with Ryujinx's 16-command-buffer pool instead of the previous 128.
+        // Preserve the exact known-good two-command-buffer configuration.
+        // This diagnostic branch changes logging only, not GPU scheduling.
         EnvironmentVariable(string: "MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", value: "2"),
 
         // Mode 2 encodes commands immediately and drains an autorelease pool for
         // each command. MoltenVK documents this as its smallest-footprint mode.
         EnvironmentVariable(string: "MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", value: "2"),
+
+        // Trace Vulkan entry/exit, thread, and duration so the persistent black
+        // screen can be localized to submit, fence, acquire, or present.
+        // Run only briefly because this creates a very large application log.
+        EnvironmentVariable(string: "MVK_CONFIG_TRACE_VULKAN_CALLS", value: "6"),
+        EnvironmentVariable(string: "MVK_CONFIG_PERFORMANCE_TRACKING", value: "1"),
+        EnvironmentVariable(string: "MVK_CONFIG_PERFORMANCE_LOGGING_FRAME_COUNT", value: "60"),
+        EnvironmentVariable(string: "MVK_CONFIG_ACTIVITY_PERFORMANCE_LOGGING_STYLE", value: "0"),
 
         // Compress retained MSL source in the Vulkan pipeline cache using LZFSE.
         EnvironmentVariable(string: "MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM", value: "1"),
