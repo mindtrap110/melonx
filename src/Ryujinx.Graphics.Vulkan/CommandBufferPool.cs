@@ -318,10 +318,20 @@ namespace Ryujinx.Graphics.Vulkan
 
                         lock (_queueLock)
                         {
-                            Fence? fence = entry.Fence.Get();
-                            if (fence != null)
+                            // Preserve the original temporary ownership guard around
+                            // vkQueueSubmit, but balance it immediately after the host call.
+                            // The command-buffer slot retains its base FenceHolder reference
+                            // until WaitAndDecrementRef() waits for GPU completion, so this
+                            // removes the per-submit leak without shortening GPU lifetime.
+                            Fence fence = entry.Fence.Get();
+
+                            try
                             {
-                                _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+                                _api.QueueSubmit(_queue, 1, in sInfo, fence).ThrowOnError();
+                            }
+                            finally
+                            {
+                                entry.Fence.Put();
                             }
                         }
                     }
