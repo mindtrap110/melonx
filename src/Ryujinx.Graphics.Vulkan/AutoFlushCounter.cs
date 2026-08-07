@@ -26,6 +26,15 @@ namespace Ryujinx.Graphics.Vulkan
         private const int MinConsecutiveQueryForFlush = 10;
         private const int InitialQueryCountForFlush = 32;
 
+        // Bound the amount of work and resource references retained by a single
+        // command buffer. Three Houses can spend a long time building an off-screen
+        // frame while the crest animation remains on screen. Without a hard draw
+        // bound, descriptor sets, buffers, textures and Auto<> references attached
+        // to that command buffer can accumulate until iOS reaches the per-process
+        // memory limit. Ryujinx already supports safe mid-frame submission through
+        // FlushAllCommands(), so force a conservative flush every 512 draws.
+        private const int MaxDrawCountWithoutFlush = 512;
+
         private readonly VulkanRenderer _gd;
 
         private long _lastFlush;
@@ -33,6 +42,8 @@ namespace Ryujinx.Graphics.Vulkan
         private bool _hasPendingQuery;
         private int _consecutiveQueries;
         private int _queryCount;
+        private int _forcedFlushCount;
+        private int _presentCount;
 
         private readonly int[] _queryCountHistory = new int[3];
         private int _queryCountHistoryIndex;
@@ -96,10 +107,24 @@ namespace Ryujinx.Graphics.Vulkan
 
         public bool ShouldFlushDraw(ulong drawCount)
         {
+            long draws = (long)(drawCount - _lastDrawCount);
+
+            if (draws >= MaxDrawCountWithoutFlush)
+            {
+                _forcedFlushCount++;
+
+                if (_forcedFlushCount <= 8 || (_forcedFlushCount & 63) == 0)
+                {
+                    Logger.Info?.PrintMsg(
+                        LogClass.Gpu,
+                        $"Three Houses forced periodic flush #{_forcedFlushCount}: draws={draws}, fastFlush={_fastFlushMode}.");
+                }
+
+                return true;
+            }
+
             if (_fastFlushMode)
             {
-                long draws = (long)(drawCount - _lastDrawCount);
-
                 if (draws < MinDrawCountForFlush)
                 {
                     if (draws == 0)
@@ -153,6 +178,13 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void Present()
         {
+            _presentCount++;
+
+            if (_presentCount <= 8 || (_presentCount & 255) == 0)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"Three Houses present milestone #{_presentCount}.");
+            }
+
             // Query flush prediction.
 
             _queryCountHistoryIndex = (_queryCountHistoryIndex + 1) % 3;
