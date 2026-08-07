@@ -10,6 +10,7 @@ namespace Ryujinx.Graphics.Vulkan
     class CommandBufferPool : IDisposable
     {
         public const int MaxCommandBuffers = 4;
+        private const int MaxDeferredSubmissionFenceRefs = 16384;
 
         private readonly int _totalCommandBuffers;
         private readonly int _totalCommandBuffersMask;
@@ -21,6 +22,8 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly bool _concurrentFenceWaitUnsupported;
         private readonly CommandPool _pool;
         private readonly Thread _owner;
+        private readonly Queue<FenceHolder> _deferredSubmissionFenceRefs = new();
+        private long _deferredSubmissionFenceReleases;
 
         public bool OwnedByCurrentThread => _owner == Thread.CurrentThread;
 
@@ -318,10 +321,24 @@ namespace Ryujinx.Graphics.Vulkan
 
                         lock (_queueLock)
                         {
-                            Fence? fence = entry.Fence.Get();
-                            if (fence != null)
+                            // Preserve the submission reference that made the progressing
+                            // iOS build stable, but retire completed references with a large
+                            // bounded delay instead of leaking them forever.
+                            Fence fence = entry.Fence.Get();
+                            bool submitted = false;
+
+                            try
                             {
-                                _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+                                _api.QueueSubmit(_queue, 1, in sInfo, fence).ThrowOnError();
+                                submitted = true;
+                            }
+                            finally
+                            {
+                                if (!submitted)
+                                {
+                                    entry.InConsumption = false;
+                                    entry.Fence.Put();
+                                }
                             }
                         }
                     }
@@ -333,6 +350,30 @@ namespace Ryujinx.Graphics.Vulkan
             }
         }
 
+        private void DeferCompletedSubmissionFence(FenceHolder fence)
+        {
+            _deferredSubmissionFenceRefs.Enqueue(fence);
+
+            int count = _deferredSubmissionFenceRefs.Count;
+
+            if (count == 1 || count == 4096 || count == 8192 || count == MaxDeferredSubmissionFenceRefs)
+            {
+                Console.WriteLine($"iOS fence retirement: retained completed submission refs={count}/{MaxDeferredSubmissionFenceRefs}.");
+            }
+
+            if (count > MaxDeferredSubmissionFenceRefs)
+            {
+                _deferredSubmissionFenceRefs.Dequeue().Put();
+                _deferredSubmissionFenceReleases++;
+
+                if (_deferredSubmissionFenceReleases == 1 ||
+                    (_deferredSubmissionFenceReleases & 4095) == 0)
+                {
+                    Console.WriteLine($"iOS fence retirement: released={_deferredSubmissionFenceReleases}, retained={_deferredSubmissionFenceRefs.Count}.");
+                }
+            }
+        }
+
         private void WaitAndDecrementRef(int cbIndex, bool refreshFence = true)
         {
             ref var entry = ref _commandBuffers[cbIndex];
@@ -341,6 +382,11 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 entry.Fence.Wait();
                 entry.InConsumption = false;
+
+                // The GPU has completed this submission. Keep the submission's Get()
+                // reference alive in a bounded retirement window so delayed MoltenVK/native
+                // users cannot immediately observe a destroyed fence.
+                DeferCompletedSubmissionFence(entry.Fence);
             }
 
             foreach (var dependant in entry.Dependants)
@@ -373,6 +419,11 @@ namespace Ryujinx.Graphics.Vulkan
             for (int i = 0; i < _totalCommandBuffers; i++)
             {
                 WaitAndDecrementRef(i, refreshFence: false);
+            }
+
+            while (_deferredSubmissionFenceRefs.Count > 0)
+            {
+                _deferredSubmissionFenceRefs.Dequeue().Put();
             }
 
             _api.DestroyCommandPool(_device, _pool, null);
