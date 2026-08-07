@@ -318,20 +318,27 @@ namespace Ryujinx.Graphics.Vulkan
 
                         lock (_queueLock)
                         {
-                            // Preserve the original temporary ownership guard around
-                            // vkQueueSubmit, but balance it immediately after the host call.
-                            // The command-buffer slot retains its base FenceHolder reference
-                            // until WaitAndDecrementRef() waits for GPU completion, so this
-                            // removes the per-submit leak without shortening GPU lifetime.
+                            // Preserve the original submission-lifetime reference. The old
+                            // code acquired this reference with Get() but never released it,
+                            // leaking one native fence per submission. Keep it until the GPU
+                            // fence has completed, then release it in WaitAndDecrementRef().
                             Fence fence = entry.Fence.Get();
+                            bool submitted = false;
 
                             try
                             {
                                 _api.QueueSubmit(_queue, 1, in sInfo, fence).ThrowOnError();
+                                submitted = true;
                             }
                             finally
                             {
-                                entry.Fence.Put();
+                                // A failed submit has no GPU operation that can own this
+                                // temporary reference, so release it immediately.
+                                if (!submitted)
+                                {
+                                    entry.InConsumption = false;
+                                    entry.Fence.Put();
+                                }
                             }
                         }
                     }
@@ -343,7 +350,7 @@ namespace Ryujinx.Graphics.Vulkan
             }
         }
 
-        private void WaitAndDecrementRef(int cbIndex, bool refreshFence = true)
+        private int WaitAndDecrementRef(int cbIndex, bool refreshFence = true)
         {
             ref var entry = ref _commandBuffers[cbIndex];
 
@@ -351,6 +358,11 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 entry.Fence.Wait();
                 entry.InConsumption = false;
+
+                // Pair the Get() performed for this successful queue submission only after
+                // the fence is complete. This preserves the original GPU-lifetime pin while
+                // allowing Dispose() below to drop the slot's base reference to zero.
+                entry.Fence.Put();
             }
 
             foreach (var dependant in entry.Dependants)
@@ -376,6 +388,8 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 entry.Fence = null;
             }
+
+            return cbIndex;
         }
 
         public unsafe void Dispose()
