@@ -350,7 +350,7 @@ namespace Ryujinx.Graphics.Vulkan
             }
         }
 
-        private int WaitAndDecrementRef(int cbIndex, bool refreshFence = true)
+        private void WaitAndDecrementRef(int cbIndex, bool refreshFence = true)
         {
             ref var entry = ref _commandBuffers[cbIndex];
 
@@ -388,8 +388,6 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 entry.Fence = null;
             }
-
-            return cbIndex;
         }
 
         public unsafe void Dispose()
