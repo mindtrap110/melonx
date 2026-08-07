@@ -2,6 +2,7 @@ using Ryujinx.Common.Logging;
 using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace Ryujinx.Graphics.Vulkan
 {
@@ -33,6 +34,7 @@ namespace Ryujinx.Graphics.Vulkan
         private bool _hasPendingQuery;
         private int _consecutiveQueries;
         private int _queryCount;
+        private int _presentCount;
 
         private readonly int[] _queryCountHistory = new int[3];
         private int _queryCountHistoryIndex;
@@ -42,6 +44,26 @@ namespace Ryujinx.Graphics.Vulkan
         private int _syncWaitHistoryIndex;
 
         private bool _fastFlushMode;
+
+        [DllImport("__Internal", EntryPoint = "os_proc_available_memory")]
+        private static extern UIntPtr OsProcAvailableMemory();
+
+        private static ulong TryGetAvailableMemory()
+        {
+            if (!OperatingSystem.IsIOS())
+            {
+                return 0;
+            }
+
+            try
+            {
+                return OsProcAvailableMemory().ToUInt64();
+            }
+            catch
+            {
+                return 0;
+            }
+        }
 
         public AutoFlushCounter(VulkanRenderer gd)
         {
@@ -153,6 +175,19 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void Present()
         {
+            int presentCount = ++_presentCount;
+
+            if (presentCount <= 8 || (presentCount & 255) == 0)
+            {
+                ulong available = TryGetAvailableMemory();
+                long managed = GC.GetTotalMemory(false);
+                long gcAvailable = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+
+                Logger.Info?.PrintMsg(
+                    LogClass.Gpu,
+                    $"Three Houses iOS memory milestone #{presentCount}: available={available}, managed={managed}, gcAvailable={gcAvailable}, buffers={_gd.BufferManager.BufferCount}.");
+            }
+
             // Query flush prediction.
 
             _queryCountHistoryIndex = (_queryCountHistoryIndex + 1) % 3;
