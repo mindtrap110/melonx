@@ -318,11 +318,13 @@ namespace Ryujinx.Graphics.Vulkan
 
                         lock (_queueLock)
                         {
-                            Fence? fence = entry.Fence.Get();
-                            if (fence != null)
-                            {
-                                _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
-                            }
+                            // The command-buffer slot itself owns the FenceHolder until
+                            // WaitAndDecrementRef() observes completion and disposes it.
+                            // Calling FenceHolder.Get() here increments its reference count,
+                            // but the old path never paired that increment with Put(), so one
+                            // VkFence leaked for every queue submission. QueueSubmit only needs
+                            // the still-owned handle; no additional reference is necessary.
+                            _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
                         }
                     }
                 }
