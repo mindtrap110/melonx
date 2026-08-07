@@ -47,9 +47,12 @@ namespace Ryujinx.Graphics.Gpu.Image
     {
         private const int MinCountForDeletion = 32;
         private const int MaxCapacity = 2048;
+        private const ulong ProcessConstrainedMemoryThreshold = 8UL * 1024 * 1024 * 1024;
         private const ulong MinTextureSizeCapacity = 512 * 1024 * 1024;
+        private const ulong MaxProcessTextureSizeCapacity = 2UL * 1024 * 1024 * 1024;
         private const ulong MaxTextureSizeCapacity = 4UL * 1024 * 1024 * 1024;
         private const ulong DefaultTextureSizeCapacity = 1UL * 1024 * 1024 * 1024;
+        private const double ProcessMemoryScaleFactor = 0.30d;
         private const float MemoryScaleFactor = 0.50f;
         private ulong _maxCacheMemoryUsage = 0;
 
@@ -77,6 +80,16 @@ namespace Ryujinx.Graphics.Gpu.Image
             if (context.Capabilities.MaximumGpuMemory == 0)
             {
                 _maxCacheMemoryUsage = DefaultTextureSizeCapacity;
+            }
+
+            long totalAvailableMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+
+            if (totalAvailableMemory > 0 && (ulong)totalAvailableMemory <= ProcessConstrainedMemoryThreshold)
+            {
+                ulong processBudget = (ulong)(totalAvailableMemory * ProcessMemoryScaleFactor);
+                processBudget = Math.Clamp(processBudget, MinTextureSizeCapacity, MaxProcessTextureSizeCapacity);
+
+                _maxCacheMemoryUsage = Math.Min(_maxCacheMemoryUsage, processBudget);
             }
         }
 
@@ -108,11 +121,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             texture.IncrementReferenceCount();
             texture.CacheNode = _textures.AddLast(texture);
 
-            if (_textures.Count > MaxCapacity ||
-                (_totalSize > _maxCacheMemoryUsage && _textures.Count >= MinCountForDeletion))
-            {
-                RemoveLeastUsedTexture();
-            }
+            RemoveLeastUsedTexturesUntilWithinCapacity();
         }
 
         /// <summary>
@@ -134,14 +143,25 @@ namespace Ryujinx.Graphics.Gpu.Image
                     _textures.AddLast(texture.CacheNode);
                 }
 
-                if (_totalSize > _maxCacheMemoryUsage && _textures.Count >= MinCountForDeletion)
-                {
-                    RemoveLeastUsedTexture();
-                }
+                RemoveLeastUsedTexturesUntilWithinCapacity();
             }
             else
             {
                 Add(texture);
+            }
+        }
+
+        private bool ShouldRemoveLeastUsedTexture()
+        {
+            return _textures.Count > MaxCapacity ||
+                (_totalSize > _maxCacheMemoryUsage && _textures.Count >= MinCountForDeletion);
+        }
+
+        private void RemoveLeastUsedTexturesUntilWithinCapacity()
+        {
+            while (_textures.Count != 0 && ShouldRemoveLeastUsedTexture())
+            {
+                RemoveLeastUsedTexture();
             }
         }
 
@@ -267,7 +287,7 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="texture">Texture to add to the short cache</param>
         public void AddShortCache(Texture texture)
         {
-            if (texture.ShortCacheEntry != null)
+            if (texture.ShortCacheEntry == null)
             {
                 var entry = new ShortTextureCacheEntry(texture);
 
