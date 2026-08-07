@@ -59,6 +59,30 @@ namespace Ryujinx.Graphics.Vulkan
             _gd = gd;
         }
 
+        private static long TryGetWorkingSet()
+        {
+            try
+            {
+                return Process.GetCurrentProcess().WorkingSet64;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private static long TryGetManagedMemory()
+        {
+            try
+            {
+                return GC.GetTotalMemory(false);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
         public void RegisterFlush(ulong drawCount)
         {
             _lastFlush = Stopwatch.GetTimestamp();
@@ -115,9 +139,12 @@ namespace Ryujinx.Graphics.Vulkan
 
                 if (_forcedFlushCount <= 8 || (_forcedFlushCount & 63) == 0)
                 {
+                    long workingSet = TryGetWorkingSet();
+                    long managed = TryGetManagedMemory();
+
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,
-                        $"Three Houses forced periodic flush #{_forcedFlushCount}: draws={draws}, fastFlush={_fastFlushMode}.");
+                        $"Three Houses forced periodic flush #{_forcedFlushCount}: draws={draws}, fastFlush={_fastFlushMode}, workingSet={workingSet}, managed={managed}.");
                 }
 
                 return true;
@@ -168,6 +195,8 @@ namespace Ryujinx.Graphics.Vulkan
 
                 return false;
             }
+
+            _consecutiveQueries = 0;
 
             long flushTimeout = _framebufferFlushTimer;
 
