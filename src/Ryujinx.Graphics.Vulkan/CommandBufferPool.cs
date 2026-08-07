@@ -10,6 +10,7 @@ namespace Ryujinx.Graphics.Vulkan
     class CommandBufferPool : IDisposable
     {
         public const int MaxCommandBuffers = 4;
+        private const int MaxDeferredSubmissionFenceRefs = 16384;
 
         private readonly int _totalCommandBuffers;
         private readonly int _totalCommandBuffersMask;
@@ -21,6 +22,8 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly bool _concurrentFenceWaitUnsupported;
         private readonly CommandPool _pool;
         private readonly Thread _owner;
+        private readonly Queue<FenceHolder> _deferredSubmissionFenceRefs = new();
+        private long _deferredSubmissionFenceReleases;
 
         public bool OwnedByCurrentThread => _owner == Thread.CurrentThread;
 
@@ -251,12 +254,6 @@ namespace Ryujinx.Graphics.Vulkan
                         var commandBufferBeginInfo = new CommandBufferBeginInfo
                         {
                             SType = StructureType.CommandBufferBeginInfo,
-                            // MoltenVK prefill modes only remain effective across reused
-                            // primary command buffers when each recording is explicitly
-                            // marked as a one-time submission. Ryujinx resets and records
-                            // these buffers anew for every submission, so this accurately
-                            // describes their lifetime and prevents later recordings from
-                            // falling back to the largest-footprint deferred encoding path.
                             Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
                         };
 
@@ -286,7 +283,6 @@ namespace Ryujinx.Graphics.Vulkan
             lock (_commandBuffers)
             {
                 int cbIndex = cbs.CommandBufferIndex;
-
                 ref var entry = ref _commandBuffers[cbIndex];
 
                 Debug.Assert(entry.InUse);
@@ -297,31 +293,39 @@ namespace Ryujinx.Graphics.Vulkan
                 _inUseCount--;
 
                 var commandBuffer = entry.CommandBuffer;
-
                 _api.EndCommandBuffer(commandBuffer).ThrowOnError();
 
                 fixed (Semaphore* pWaitSemaphores = waitSemaphores, pSignalSemaphores = signalSemaphores)
+                fixed (PipelineStageFlags* pWaitDstStageMask = waitDstStageMask)
                 {
-                    fixed (PipelineStageFlags* pWaitDstStageMask = waitDstStageMask)
+                    SubmitInfo sInfo = new()
                     {
-                        SubmitInfo sInfo = new()
-                        {
-                            SType = StructureType.SubmitInfo,
-                            WaitSemaphoreCount = !waitSemaphores.IsEmpty ? (uint)waitSemaphores.Length : 0,
-                            PWaitSemaphores = pWaitSemaphores,
-                            PWaitDstStageMask = pWaitDstStageMask,
-                            CommandBufferCount = 1,
-                            PCommandBuffers = &commandBuffer,
-                            SignalSemaphoreCount = !signalSemaphores.IsEmpty ? (uint)signalSemaphores.Length : 0,
-                            PSignalSemaphores = pSignalSemaphores,
-                        };
+                        SType = StructureType.SubmitInfo,
+                        WaitSemaphoreCount = !waitSemaphores.IsEmpty ? (uint)waitSemaphores.Length : 0,
+                        PWaitSemaphores = pWaitSemaphores,
+                        PWaitDstStageMask = pWaitDstStageMask,
+                        CommandBufferCount = 1,
+                        PCommandBuffers = &commandBuffer,
+                        SignalSemaphoreCount = !signalSemaphores.IsEmpty ? (uint)signalSemaphores.Length : 0,
+                        PSignalSemaphores = pSignalSemaphores,
+                    };
 
-                        lock (_queueLock)
+                    lock (_queueLock)
+                    {
+                        Fence fence = entry.Fence.Get();
+                        bool submitted = false;
+
+                        try
                         {
-                            Fence? fence = entry.Fence.Get();
-                            if (fence != null)
+                            _api.QueueSubmit(_queue, 1, in sInfo, fence).ThrowOnError();
+                            submitted = true;
+                        }
+                        finally
+                        {
+                            if (!submitted)
                             {
-                                _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+                                entry.InConsumption = false;
+                                entry.Fence.Put();
                             }
                         }
                     }
@@ -333,6 +337,28 @@ namespace Ryujinx.Graphics.Vulkan
             }
         }
 
+        private void DeferCompletedSubmissionFence(FenceHolder fence)
+        {
+            _deferredSubmissionFenceRefs.Enqueue(fence);
+            int count = _deferredSubmissionFenceRefs.Count;
+
+            if (count == 1 || count == 4096 || count == 8192 || count == MaxDeferredSubmissionFenceRefs)
+            {
+                Console.WriteLine($"iOS fence retirement: retained completed submission refs={count}/{MaxDeferredSubmissionFenceRefs}.");
+            }
+
+            if (count > MaxDeferredSubmissionFenceRefs)
+            {
+                _deferredSubmissionFenceRefs.Dequeue().Put();
+                _deferredSubmissionFenceReleases++;
+
+                if (_deferredSubmissionFenceReleases == 1 || (_deferredSubmissionFenceReleases & 4095) == 0)
+                {
+                    Console.WriteLine($"iOS fence retirement: released={_deferredSubmissionFenceReleases}, retained={_deferredSubmissionFenceRefs.Count}.");
+                }
+            }
+        }
+
         private void WaitAndDecrementRef(int cbIndex, bool refreshFence = true)
         {
             ref var entry = ref _commandBuffers[cbIndex];
@@ -341,6 +367,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 entry.Fence.Wait();
                 entry.InConsumption = false;
+                DeferCompletedSubmissionFence(entry.Fence);
             }
 
             foreach (var dependant in entry.Dependants)
@@ -373,6 +400,11 @@ namespace Ryujinx.Graphics.Vulkan
             for (int i = 0; i < _totalCommandBuffers; i++)
             {
                 WaitAndDecrementRef(i, refreshFence: false);
+            }
+
+            while (_deferredSubmissionFenceRefs.Count > 0)
+            {
+                _deferredSubmissionFenceRefs.Dequeue().Put();
             }
 
             _api.DestroyCommandPool(_device, _pool, null);
