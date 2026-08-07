@@ -48,7 +48,7 @@ namespace Ryujinx.Graphics.Gpu.Image
         private const int MinCountForDeletion = 32;
         private const int MaxCapacity = 2048;
         private const ulong MinTextureSizeCapacity = 512 * 1024 * 1024;
-        private const ulong MaxTextureSizeCapacity = 4UL * 1024 * 1024 * 1024;
+        private const ulong MaxTextureSizeCapacity = 1UL * 1024 * 1024 * 1024;
         private const ulong DefaultTextureSizeCapacity = 1UL * 1024 * 1024 * 1024;
         private const float MemoryScaleFactor = 0.50f;
         private ulong _maxCacheMemoryUsage = 0;
