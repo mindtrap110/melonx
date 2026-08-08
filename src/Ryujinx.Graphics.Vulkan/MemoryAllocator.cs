@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
@@ -8,6 +9,7 @@ namespace Ryujinx.Graphics.Vulkan
     class MemoryAllocator : IDisposable
     {
         private const ulong MaxDeviceMemoryUsageEstimate = 16UL * 1024 * 1024 * 1024;
+        private const int IosMinimumBlockAlignment = 4 * 1024 * 1024;
 
         private readonly Vk _api;
         private readonly VulkanPhysicalDevice _physicalDevice;
@@ -22,7 +24,28 @@ namespace Ryujinx.Graphics.Vulkan
             _physicalDevice = physicalDevice;
             _device = device;
             _blockLists = new List<MemoryAllocatorBlockList>();
-            _blockAlignment = (int)Math.Min(int.MaxValue, MaxDeviceMemoryUsageEstimate / _physicalDevice.PhysicalDeviceProperties.Limits.MaxMemoryAllocationCount);
+
+            ulong maxMemoryAllocationCount = Math.Max(
+                1UL,
+                (ulong)_physicalDevice.PhysicalDeviceProperties.Limits.MaxMemoryAllocationCount);
+
+            int reportedBlockAlignment = (int)Math.Min(
+                int.MaxValue,
+                MaxDeviceMemoryUsageEstimate / maxMemoryAllocationCount);
+
+            // MoltenVK reports effectively-unbounded maxMemoryAllocationCount values on Apple GPUs.
+            // Feeding that sentinel-like value into Ryujinx's block size heuristic collapses the
+            // suballocation block alignment to only a few bytes, which defeats block pooling and
+            // can produce huge numbers of VkDeviceMemory allocations/VM regions on iOS.
+            // 4 MiB is the value produced by the original heuristic for a 4096-allocation limit.
+            _blockAlignment = OperatingSystem.IsIOS()
+                ? Math.Max(IosMinimumBlockAlignment, reportedBlockAlignment)
+                : reportedBlockAlignment;
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"Vulkan memory allocator: maxMemoryAllocationCount={maxMemoryAllocationCount}, rawBlockAlignment={reportedBlockAlignment}, effectiveBlockAlignment={_blockAlignment}, iOS={OperatingSystem.IsIOS()}.");
+
             _lock = new(LockRecursionPolicy.NoRecursion);
         }
 
