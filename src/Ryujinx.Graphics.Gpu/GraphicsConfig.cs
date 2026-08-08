@@ -1,3 +1,5 @@
+using System;
+
 namespace Ryujinx.Graphics.Gpu
 {
 #pragma warning disable CA2211 // Non-constant fields should not be visible
@@ -63,10 +65,19 @@ namespace Ryujinx.Graphics.Gpu
         /// </summary>
         public static bool EnableSpirvCompilationOnVulkan = true;
 
+        private static bool _enableTextureRecompression;
+
         /// <summary>
         /// Enables or disables recompression of compressed textures that are not natively supported by the host.
+        /// The iOS test build forces this on because unsupported Switch texture formats can otherwise expand
+        /// substantially when represented by the Metal backend. Assignments from normal configuration are still
+        /// preserved for non-iOS platforms.
         /// </summary>
-        public static bool EnableTextureRecompression = false;
+        public static bool EnableTextureRecompression
+        {
+            get => _enableTextureRecompression || OperatingSystem.IsIOS();
+            set => _enableTextureRecompression = value;
+        }
 
         /// <summary>
         /// Enables or disables color space passthrough, if available.
