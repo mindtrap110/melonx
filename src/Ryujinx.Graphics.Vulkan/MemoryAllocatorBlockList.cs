@@ -1,4 +1,5 @@
 using Ryujinx.Common;
+using Ryujinx.Common.Logging;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
@@ -201,6 +202,7 @@ namespace Ryujinx.Graphics.Vulkan
                         ulong offset = block.Allocate(size, alignment);
                         if (offset != InvalidOffset)
                         {
+                            VulkanMemoryAudit.OnSuballocationAllocated(ForBuffer, size);
                             return new MemoryAllocation(this, block, block.Memory, GetHostPointer(block, offset), offset, size);
                         }
                     }
@@ -234,10 +236,12 @@ namespace Ryujinx.Graphics.Vulkan
             var newBlock = new Block(deviceMemory, hostPointer, blockAlignedSize);
 
             InsertBlock(newBlock);
+            VulkanMemoryAudit.OnBlockAllocated(ForBuffer, blockAlignedSize);
 
             ulong newBlockOffset = newBlock.Allocate(size, alignment);
             Debug.Assert(newBlockOffset != InvalidOffset);
 
+            VulkanMemoryAudit.OnSuballocationAllocated(ForBuffer, size);
             return new MemoryAllocation(this, newBlock, deviceMemory, GetHostPointer(newBlock, newBlockOffset), newBlockOffset, size);
         }
 
@@ -254,6 +258,7 @@ namespace Ryujinx.Graphics.Vulkan
         public void Free(Block block, ulong offset, ulong size)
         {
             block.Free(offset, size);
+            VulkanMemoryAudit.OnSuballocationFreed(ForBuffer, size);
 
             if (block.IsTotallyFree())
             {
@@ -276,6 +281,7 @@ namespace Ryujinx.Graphics.Vulkan
                 }
 
                 block.Destroy(_api, _device);
+                VulkanMemoryAudit.OnBlockFreed(ForBuffer, block.Size);
             }
         }
 
@@ -305,6 +311,103 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _blocks[i].Destroy(_api, _device);
             }
+        }
+    }
+
+    internal static class VulkanMemoryAudit
+    {
+        private static readonly long StartTimestamp = Stopwatch.GetTimestamp();
+
+        private static long _eventSequence;
+        private static long _blockCreates;
+        private static long _blockFrees;
+        private static long _suballocationCreates;
+        private static long _suballocationFrees;
+
+        private static long _bufferBlockBytes;
+        private static long _imageBlockBytes;
+        private static long _bufferLiveBytes;
+        private static long _imageLiveBytes;
+        private static long _bufferBlocks;
+        private static long _imageBlocks;
+        private static long _bufferSuballocations;
+        private static long _imageSuballocations;
+
+        public static void OnBlockAllocated(bool buffer, ulong size)
+        {
+            long bytes = checked((long)size);
+
+            Interlocked.Increment(ref _blockCreates);
+            Interlocked.Add(ref buffer ? ref _bufferBlockBytes : ref _imageBlockBytes, bytes);
+            Interlocked.Increment(ref buffer ? ref _bufferBlocks : ref _imageBlocks);
+
+            MaybeLog("block+");
+        }
+
+        public static void OnBlockFreed(bool buffer, ulong size)
+        {
+            long bytes = checked((long)size);
+
+            Interlocked.Increment(ref _blockFrees);
+            Interlocked.Add(ref buffer ? ref _bufferBlockBytes : ref _imageBlockBytes, -bytes);
+            Interlocked.Decrement(ref buffer ? ref _bufferBlocks : ref _imageBlocks);
+
+            MaybeLog("block-");
+        }
+
+        public static void OnSuballocationAllocated(bool buffer, ulong size)
+        {
+            long bytes = checked((long)size);
+
+            Interlocked.Increment(ref _suballocationCreates);
+            Interlocked.Add(ref buffer ? ref _bufferLiveBytes : ref _imageLiveBytes, bytes);
+            Interlocked.Increment(ref buffer ? ref _bufferSuballocations : ref _imageSuballocations);
+
+            MaybeLog("alloc+");
+        }
+
+        public static void OnSuballocationFreed(bool buffer, ulong size)
+        {
+            long bytes = checked((long)size);
+
+            Interlocked.Increment(ref _suballocationFrees);
+            Interlocked.Add(ref buffer ? ref _bufferLiveBytes : ref _imageLiveBytes, -bytes);
+            Interlocked.Decrement(ref buffer ? ref _bufferSuballocations : ref _imageSuballocations);
+
+            MaybeLog("alloc-");
+        }
+
+        private static void MaybeLog(string reason)
+        {
+            long seq = Interlocked.Increment(ref _eventSequence);
+
+            if (seq > 16 && (seq & 1023) != 0)
+            {
+                return;
+            }
+
+            long bufferBlockBytes = Interlocked.Read(ref _bufferBlockBytes);
+            long imageBlockBytes = Interlocked.Read(ref _imageBlockBytes);
+            long bufferLiveBytes = Interlocked.Read(ref _bufferLiveBytes);
+            long imageLiveBytes = Interlocked.Read(ref _imageLiveBytes);
+            long blockBytes = bufferBlockBytes + imageBlockBytes;
+            long liveBytes = bufferLiveBytes + imageLiveBytes;
+            long slackBytes = Math.Max(0, blockBytes - liveBytes);
+            long elapsedMs = (long)((Stopwatch.GetTimestamp() - StartTimestamp) * 1000.0 / Stopwatch.Frequency);
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"[VK-MEM] seq={seq} ms={elapsedMs} reason={reason} " +
+                $"blockBytes={blockBytes} liveBytes={liveBytes} slackBytes={slackBytes} " +
+                $"blocks={Interlocked.Read(ref _bufferBlocks) + Interlocked.Read(ref _imageBlocks)} " +
+                $"allocs={Interlocked.Read(ref _bufferSuballocations) + Interlocked.Read(ref _imageSuballocations)} " +
+                $"bufBlockBytes={bufferBlockBytes} bufLiveBytes={bufferLiveBytes} " +
+                $"bufBlocks={Interlocked.Read(ref _bufferBlocks)} bufAllocs={Interlocked.Read(ref _bufferSuballocations)} " +
+                $"imgBlockBytes={imageBlockBytes} imgLiveBytes={imageLiveBytes} " +
+                $"imgBlocks={Interlocked.Read(ref _imageBlocks)} imgAllocs={Interlocked.Read(ref _imageSuballocations)} " +
+                $"blockCreates={Interlocked.Read(ref _blockCreates)} blockFrees={Interlocked.Read(ref _blockFrees)} " +
+                $"suballocCreates={Interlocked.Read(ref _suballocationCreates)} suballocFrees={Interlocked.Read(ref _suballocationFrees)} " +
+                $"managed={GC.GetTotalMemory(false)}.");
         }
     }
 }
