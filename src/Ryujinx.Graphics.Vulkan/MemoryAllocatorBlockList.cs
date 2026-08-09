@@ -338,8 +338,16 @@ namespace Ryujinx.Graphics.Vulkan
             long bytes = checked((long)size);
 
             Interlocked.Increment(ref _blockCreates);
-            Interlocked.Add(ref buffer ? ref _bufferBlockBytes : ref _imageBlockBytes, bytes);
-            Interlocked.Increment(ref buffer ? ref _bufferBlocks : ref _imageBlocks);
+            if (buffer)
+            {
+                Interlocked.Add(ref _bufferBlockBytes, bytes);
+                Interlocked.Increment(ref _bufferBlocks);
+            }
+            else
+            {
+                Interlocked.Add(ref _imageBlockBytes, bytes);
+                Interlocked.Increment(ref _imageBlocks);
+            }
 
             MaybeLog("block+");
         }
@@ -349,8 +357,16 @@ namespace Ryujinx.Graphics.Vulkan
             long bytes = checked((long)size);
 
             Interlocked.Increment(ref _blockFrees);
-            Interlocked.Add(ref buffer ? ref _bufferBlockBytes : ref _imageBlockBytes, -bytes);
-            Interlocked.Decrement(ref buffer ? ref _bufferBlocks : ref _imageBlocks);
+            if (buffer)
+            {
+                Interlocked.Add(ref _bufferBlockBytes, -bytes);
+                Interlocked.Decrement(ref _bufferBlocks);
+            }
+            else
+            {
+                Interlocked.Add(ref _imageBlockBytes, -bytes);
+                Interlocked.Decrement(ref _imageBlocks);
+            }
 
             MaybeLog("block-");
         }
@@ -360,8 +376,16 @@ namespace Ryujinx.Graphics.Vulkan
             long bytes = checked((long)size);
 
             Interlocked.Increment(ref _suballocationCreates);
-            Interlocked.Add(ref buffer ? ref _bufferLiveBytes : ref _imageLiveBytes, bytes);
-            Interlocked.Increment(ref buffer ? ref _bufferSuballocations : ref _imageSuballocations);
+            if (buffer)
+            {
+                Interlocked.Add(ref _bufferLiveBytes, bytes);
+                Interlocked.Increment(ref _bufferSuballocations);
+            }
+            else
+            {
+                Interlocked.Add(ref _imageLiveBytes, bytes);
+                Interlocked.Increment(ref _imageSuballocations);
+            }
 
             MaybeLog("alloc+");
         }
@@ -371,8 +395,16 @@ namespace Ryujinx.Graphics.Vulkan
             long bytes = checked((long)size);
 
             Interlocked.Increment(ref _suballocationFrees);
-            Interlocked.Add(ref buffer ? ref _bufferLiveBytes : ref _imageLiveBytes, -bytes);
-            Interlocked.Decrement(ref buffer ? ref _bufferSuballocations : ref _imageSuballocations);
+            if (buffer)
+            {
+                Interlocked.Add(ref _bufferLiveBytes, -bytes);
+                Interlocked.Decrement(ref _bufferSuballocations);
+            }
+            else
+            {
+                Interlocked.Add(ref _imageLiveBytes, -bytes);
+                Interlocked.Decrement(ref _imageSuballocations);
+            }
 
             MaybeLog("alloc-");
         }
